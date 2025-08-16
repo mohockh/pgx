@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 
-from universal_poker import UniversalPoker, State, FOLD, CALL, RAISE, _init, _step
+from pgx import universal_poker
 
 
 class TestUniversalPoker:
@@ -9,11 +9,11 @@ class TestUniversalPoker:
     
     def test_init_basic(self):
         """Test basic game initialization."""
-        env = UniversalPoker()
+        env = universal_poker.UniversalPoker()
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
-        assert isinstance(state, State)
+        assert isinstance(state, universal_poker.State)
         assert state.num_players == 2
         assert state.round == 0  # Start at preflop
         assert state.pot == 3    # Small blind (1) + big blind (2)
@@ -23,7 +23,7 @@ class TestUniversalPoker:
         
     def test_init_custom_params(self):
         """Test initialization with custom parameters."""
-        env = UniversalPoker(num_players=3, stack_size=100, small_blind=5, big_blind=10)
+        env = universal_poker.UniversalPoker(num_players=3, stack_size=100, small_blind=5, big_blind=10)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -35,7 +35,7 @@ class TestUniversalPoker:
         
     def test_hole_cards_dealt(self):
         """Test that hole cards are properly dealt."""
-        env = UniversalPoker()
+        env = universal_poker.UniversalPoker()
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -47,7 +47,7 @@ class TestUniversalPoker:
             
     def test_board_cards_dealt(self):
         """Test that board cards are dealt but not visible initially."""
-        env = UniversalPoker()
+        env = universal_poker.UniversalPoker()
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -58,32 +58,32 @@ class TestUniversalPoker:
         
     def test_legal_actions_preflop(self):
         """Test legal actions in preflop."""
-        env = UniversalPoker()
+        env = universal_poker.UniversalPoker()
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
         # First player to act should be able to fold, call, or raise
         legal_actions = state.legal_action_mask
-        assert legal_actions[FOLD]   # Can fold
-        assert legal_actions[CALL]   # Can call
-        assert legal_actions[RAISE]  # Can raise
+        assert legal_actions[universal_poker.FOLD]   # Can fold
+        assert legal_actions[universal_poker.CALL]   # Can call
+        assert legal_actions[universal_poker.RAISE]  # Can raise
         
     def test_fold_action(self):
         """Test folding action."""
-        env = UniversalPoker()
+        env = universal_poker.UniversalPoker()
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
         # Player folds
         current_player = state.current_player
-        new_state = env.step(state, FOLD)
+        new_state = env.step(state, universal_poker.FOLD)
         
         assert new_state.folded[current_player]
         assert new_state.terminated  # Game should end with fold in 2-player game
         
     def test_call_action(self):
         """Test calling action."""
-        env = UniversalPoker()
+        env = universal_poker.UniversalPoker()
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -93,7 +93,7 @@ class TestUniversalPoker:
         call_amount = state.max_bet - initial_bet
         
         # Player calls
-        new_state = env.step(state, CALL)
+        new_state = env.step(state, universal_poker.CALL)
         
         assert new_state.bets[current_player] == state.max_bet
         assert new_state.stacks[current_player] == initial_stack - call_amount
@@ -101,7 +101,7 @@ class TestUniversalPoker:
         
     def test_raise_action(self):
         """Test raising action."""
-        env = UniversalPoker()
+        env = universal_poker.UniversalPoker()
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -109,7 +109,7 @@ class TestUniversalPoker:
         initial_stack = state.stacks[current_player]
         
         # Player raises
-        new_state = env.step(state, RAISE)
+        new_state = env.step(state, universal_poker.RAISE)
         
         assert new_state.max_bet > state.max_bet
         assert new_state.stacks[current_player] < initial_stack
@@ -117,13 +117,13 @@ class TestUniversalPoker:
         
     def test_betting_round_progression(self):
         """Test progression through betting rounds."""
-        env = UniversalPoker()
+        env = universal_poker.UniversalPoker()
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
         # Both players call to end preflop
-        state = env.step(state, CALL)  # First player calls
-        state = env.step(state, CALL)  # Second player calls (checks)
+        state = env.step(state, universal_poker.CALL)  # First player calls
+        state = env.step(state, universal_poker.CALL)  # Second player calls (checks)
         
         # Should advance to flop
         assert state.round == 1
@@ -131,7 +131,7 @@ class TestUniversalPoker:
         
     def test_all_in_scenario(self):
         """Test all-in scenario."""
-        env = UniversalPoker(stack_size=10)  # Small stacks
+        env = universal_poker.UniversalPoker(stack_size=10)  # Small stacks
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -141,19 +141,19 @@ class TestUniversalPoker:
                 break
                 
             legal_actions = state.legal_action_mask
-            if legal_actions[RAISE]:
-                state = env.step(state, RAISE)
-            elif legal_actions[CALL]:
-                state = env.step(state, CALL)
+            if legal_actions[universal_poker.RAISE]:
+                state = env.step(state, universal_poker.RAISE)
+            elif legal_actions[universal_poker.CALL]:
+                state = env.step(state, universal_poker.CALL)
             else:
-                state = env.step(state, FOLD)
+                state = env.step(state, universal_poker.FOLD)
         
         # Check if any player went all-in
         assert jnp.any(state.all_in[:state.num_players]) or state.terminated
         
     def test_observation_shape(self):
         """Test observation shape and content."""
-        env = UniversalPoker()
+        env = universal_poker.UniversalPoker()
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -170,12 +170,12 @@ class TestUniversalPoker:
             
     def test_rewards_on_termination(self):
         """Test reward calculation when game terminates."""
-        env = UniversalPoker()
+        env = universal_poker.UniversalPoker()
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
         # Player 0 folds, player 1 should win
-        state = env.step(state, FOLD)
+        state = env.step(state, universal_poker.FOLD)
         
         assert state.terminated
         assert state.rewards[1] > 0  # Winner gets positive reward
@@ -183,7 +183,7 @@ class TestUniversalPoker:
         
     def test_multiple_players(self):
         """Test game with more than 2 players."""
-        env = UniversalPoker(num_players=4)
+        env = universal_poker.UniversalPoker(num_players=4)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -196,7 +196,7 @@ class TestUniversalPoker:
             
     def test_game_properties(self):
         """Test game properties."""
-        env = UniversalPoker()
+        env = universal_poker.UniversalPoker()
         
         assert env.id == "universal_poker"
         assert env.version == "v1"
@@ -204,22 +204,22 @@ class TestUniversalPoker:
         
     def test_jax_compilation(self):
         """Test that key functions can be JIT compiled."""
-        env = UniversalPoker()
+        env = universal_poker.UniversalPoker()
         
         # Test init compilation
         init_fn = jax.jit(env.init)
         key = jax.random.PRNGKey(42)
         state = init_fn(key)
-        assert isinstance(state, State)
+        assert isinstance(state, universal_poker.State)
         
         # Test step compilation
         step_fn = jax.jit(env.step)
-        new_state = step_fn(state, CALL)
-        assert isinstance(new_state, State)
+        new_state = step_fn(state, universal_poker.CALL)
+        assert isinstance(new_state, universal_poker.State)
         
     def test_random_games(self):
         """Test playing multiple random games."""
-        env = UniversalPoker()
+        env = universal_poker.UniversalPoker()
         
         for seed in range(10):
             key = jax.random.PRNGKey(seed)
@@ -244,7 +244,7 @@ class TestUniversalPoker:
             
     def test_deterministic_behavior(self):
         """Test that games are deterministic given the same seed."""
-        env = UniversalPoker()
+        env = universal_poker.UniversalPoker()
         key = jax.random.PRNGKey(42)
         
         # Play two identical games
@@ -258,7 +258,7 @@ class TestUniversalPoker:
         
     def test_state_consistency(self):
         """Test state consistency throughout game."""
-        env = UniversalPoker()
+        env = universal_poker.UniversalPoker()
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -282,16 +282,49 @@ class TestUniversalPoker:
                 total_chips = jnp.sum(state.stacks[:state.num_players]) + state.pot
                 assert total_chips == initial_total
                 
+    def test_all_in_raise_insufficient_minimum(self):
+        """Test that a player can raise all-in even when they don't have enough for the minimum raise."""
+        # Set up scenario where Player 1 has insufficient chips for minimum raise but can go all-in
+        env = universal_poker.UniversalPoker(stack_size=5, small_blind=1, big_blind=2)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Initial: Player 0 has 4 chips (5-1), Player 1 has 3 chips (5-2)
+        # Player 0 raises first, then Player 1 faces a situation where they can't make full minimum raise
+        
+        # Player 0 raises to 4
+        state = env.step(state, universal_poker.RAISE)
+        
+        # Now Player 1 has 3 chips remaining, already bet 2, max_bet=4
+        # Total chips = 3 + 2 = 5, which is > max_bet=4, so they should be able to raise
+        # But minimum raise would be to 8, requiring 6 more chips, which they don't have
+        # They should still be able to raise all-in
+        
+        current_player = state.current_player
+        assert current_player == 1, "Should be Player 1's turn"
+        
+        legal_actions = state.legal_action_mask
+        assert legal_actions[universal_poker.FOLD], "Player should be able to fold"
+        assert legal_actions[universal_poker.CALL], "Player should be able to call"
+        assert legal_actions[universal_poker.RAISE], "Player should be able to raise all-in even with insufficient chips for minimum raise"
+        
+        # Test the actual raise
+        new_state = env.step(state, universal_poker.RAISE)
+        
+        # Player should be all-in
+        assert new_state.all_in[current_player], "Player should be all-in after raising with insufficient chips"
+        assert new_state.stacks[current_player] == 0, "Player stack should be 0 after all-in"
+        
     def test_edge_cases(self):
         """Test various edge cases."""
         # Test with minimum players
-        env = UniversalPoker(num_players=2)
+        env = universal_poker.UniversalPoker(num_players=2)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         assert state.num_players == 2
         
         # Test with very small stacks
-        env = UniversalPoker(stack_size=3, small_blind=1, big_blind=2)
+        env = universal_poker.UniversalPoker(stack_size=3, small_blind=1, big_blind=2)
         state = env.init(key)
         assert state.stacks[0] == 2  # Almost all-in from start
         assert state.stacks[1] == 1  # Almost all-in from start
@@ -327,6 +360,12 @@ if __name__ == "__main__":
         
         test_suite.test_observation_shape()
         print("✓ Observation shape test passed")
+        
+        test_suite.test_rewards_on_termination()
+        print("✓ Rewards on termination test passed")
+        
+        test_suite.test_multiple_players()
+        print("✓ Multiple players test passed")
         
         test_suite.test_game_properties()
         print("✓ Game properties test passed")

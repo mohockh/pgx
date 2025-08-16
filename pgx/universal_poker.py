@@ -227,7 +227,10 @@ def _apply_action(state: State, action: int) -> State:
         return state.replace(bets=bets, stacks=stacks, pot=pot, all_in=all_in)
     
     def raise_action():
-        raise_amount = state.max_bet * 2 - state.bets[current_player]
+        # When max_bet is 0, minimum raise is big_blind
+        # Otherwise, raise is double the current max bet
+        min_raise = jnp.where(state.max_bet == 0, state.big_blind, state.max_bet * 2)
+        raise_amount = min_raise - state.bets[current_player]
         actual_raise = jnp.minimum(raise_amount, state.stacks[current_player])
         
         bets = state.bets.at[current_player].add(actual_raise)
@@ -373,9 +376,9 @@ def _get_legal_actions(state: State) -> Array:
         # Can call if there's a bet to call and player has chips
         can_call = (state.bets[current_player] < state.max_bet) & (state.stacks[current_player] > 0)
         
-        # Can raise if player has enough chips and hasn't reached max bet
-        min_raise = state.max_bet * 2 - state.bets[current_player]
-        can_raise = (state.stacks[current_player] >= min_raise) & (state.max_bet < state.stacks[current_player])
+        # Can raise if total chips (stack + current bet) is more than max bet
+        total_chips = state.stacks[current_player] + state.bets[current_player]
+        can_raise = total_chips > state.max_bet
         
         return jnp.array([can_fold, can_call, can_raise], dtype=jnp.bool_)
     
@@ -436,11 +439,18 @@ def _calculate_rewards(state: State) -> Array:
 
 
 def _evaluate_hand(hole_cards: Array, board_cards: Array, round: int) -> int:
-    """Evaluate hand strength. Returns higher values for better hands."""
-    # Simple hand evaluation - in a full implementation this would be much more complex
-    # For now, just use highest card value as a placeholder
+    """Evaluate hand strength using proper poker hand evaluation."""
+    # Import the evaluator (done inside function to avoid circular imports)
+    try:
+        from .poker_eval.jax_evaluator import evaluate_hand_jax
+    except ImportError:
+        # Fallback for relative import issues
+        import sys
+        import os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+        from poker_eval.jax_evaluator import evaluate_hand_jax
     
-    # Number of board cards visible in each round: preflop=0, flop=3, turn=1, river=1
+    # Number of board cards visible in each round: preflop=0, flop=3, turn=4, river=5
     num_board_cards = jnp.array([0, 3, 4, 5], dtype=jnp.int32)  # Cumulative counts
     
     # Get number of visible board cards for this round
@@ -452,10 +462,20 @@ def _evaluate_hand(hole_cards: Array, board_cards: Array, round: int) -> int:
     
     # Combine hole cards and visible board cards
     all_cards = jnp.concatenate([hole_cards[:2], visible_board])
-    valid_cards = jnp.where(all_cards >= 0, all_cards, 0)
     
-    # Return highest card as simple hand strength
-    return jnp.max(valid_cards)
+    # For preflop, just return high card value to avoid evaluating incomplete hands
+    def preflop_eval():
+        return jnp.max(hole_cards[:2])
+    
+    def postflop_eval():
+        # Use proper hand evaluation with all cards (including -1 padding)
+        return evaluate_hand_jax(all_cards)
+    
+    return jax.lax.cond(
+        num_visible == 0,  # Preflop
+        preflop_eval,
+        postflop_eval
+    )
 
 
 def _observe(state: State, player_id: int) -> Array:
