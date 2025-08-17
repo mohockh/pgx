@@ -189,9 +189,12 @@ def _step(state: State, action: int) -> State:
     num_active = jnp.sum(active_mask)
     terminated = (num_active <= 1) | (new_state.round >= 4)
     
-    # Calculate rewards if terminated
-    final_rewards = _calculate_rewards(new_state)
-    rewards = jax.lax.select(terminated, final_rewards, new_state.rewards)
+    # Calculate rewards only if terminated (Optimization #1: Lazy evaluation)
+    rewards = jax.lax.cond(
+        terminated,
+        lambda: _calculate_rewards(new_state),
+        lambda: new_state.rewards
+    )
     
     # Update legal actions
     legal_action_mask = jax.lax.cond(
@@ -407,27 +410,48 @@ def _calculate_rewards(state: State) -> Array:
     
     # If multiple players remain, determine winner by hand strength
     def multiple_winners():
-        # Evaluate hand strengths for active players using vectorized operations
-        def eval_player_hand(p):
-            # Only evaluate if player is in range and active
-            in_range = p < state.num_players
-            return jax.lax.cond(
-                active_mask[p] & in_range,
-                lambda: _evaluate_hand(state.hole_cards[p], state.board_cards, state.round),
-                lambda: jnp.int32(-1)  # Folded players get -1
-            )
+        # Optimization #2: Only evaluate hands if game reached showdown (round >= 4)
+        # If game ended before showdown, split pot equally among active players
+        reached_showdown = state.round >= 4
+        # Debug: Print the round when this is called
+        # jax.debug.print("_calculate_rewards called: round={}, reached_showdown={}", state.round, reached_showdown)
         
-        hand_strengths = jax.vmap(eval_player_hand)(jnp.arange(rewards_shape))
+        def showdown_evaluation():
+            # Evaluate hand strengths for active players using vectorized operations
+            def eval_player_hand(p):
+                # Only evaluate if player is in range and active
+                in_range = p < state.num_players
+                return jax.lax.cond(
+                    active_mask[p] & in_range,
+                    lambda: _evaluate_hand(state.hole_cards[p], state.board_cards, state.round),
+                    lambda: jnp.int32(-1)  # Folded players get -1
+                )
+            
+            hand_strengths = jax.vmap(eval_player_hand)(jnp.arange(rewards_shape))
+            
+            # Find the best hand strength among active players
+            best_strength = jnp.max(jnp.where(active_mask, hand_strengths, -1))
+            
+            # All players with best strength split the pot
+            winners_mask = (hand_strengths == best_strength) & active_mask
+            num_winners = jnp.sum(winners_mask)
+            pot_share = state.pot // jnp.maximum(num_winners, 1)  # Avoid division by zero
+            
+            return jnp.where(winners_mask, pot_share, 0.0).astype(jnp.float32)
         
-        # Find the best hand strength among active players
-        best_strength = jnp.max(jnp.where(active_mask, hand_strengths, -1))
+        def equal_split():
+            # Split pot equally among all active players (no hand evaluation needed)
+            num_winners = jnp.sum(active_mask)
+            pot_share = state.pot // jnp.maximum(num_winners, 1)  # Avoid division by zero
+            # Debug: Print when this path is taken
+            # jax.debug.print("Using equal_split: round={}, pot={}, num_winners={}", state.round, state.pot, num_winners)
+            return jnp.where(active_mask, pot_share, 0.0).astype(jnp.float32)
         
-        # All players with best strength split the pot
-        winners_mask = (hand_strengths == best_strength) & active_mask
-        num_winners = jnp.sum(winners_mask)
-        pot_share = state.pot // jnp.maximum(num_winners, 1)  # Avoid division by zero
-        
-        return jnp.where(winners_mask, pot_share, 0.0).astype(jnp.float32)
+        return jax.lax.cond(
+            reached_showdown,
+            showdown_evaluation,
+            equal_split
+        )
     
     final_rewards = jax.lax.cond(
         num_active == 1,
