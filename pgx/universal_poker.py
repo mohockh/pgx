@@ -189,18 +189,21 @@ def _step(state: State, action: int) -> State:
     num_active = jnp.sum(active_mask)
     terminated = (num_active <= 1) | (new_state.round >= 4)
     
-    # Calculate rewards only if terminated (Optimization #1: Lazy evaluation)
-    rewards = jax.lax.cond(
-        terminated,
-        lambda: _calculate_rewards(new_state),
-        lambda: new_state.rewards
-    )
+    # Calculate rewards and legal actions in single conditional (Phase 1.1: Merge termination checks)
+    def terminated_updates():
+        final_rewards = _calculate_rewards(new_state)
+        final_legal_actions = jnp.zeros(3, dtype=jnp.bool_)
+        return final_rewards, final_legal_actions
     
-    # Update legal actions
-    legal_action_mask = jax.lax.cond(
+    def active_updates():
+        active_rewards = new_state.rewards
+        active_legal_actions = _get_legal_actions(new_state)
+        return active_rewards, active_legal_actions
+    
+    rewards, legal_action_mask = jax.lax.cond(
         terminated,
-        lambda: jnp.zeros(3, dtype=jnp.bool_),
-        lambda: _get_legal_actions(new_state)
+        terminated_updates,
+        active_updates
     )
     
     return new_state.replace(
@@ -211,69 +214,65 @@ def _step(state: State, action: int) -> State:
 
 
 def _apply_action(state: State, action: int) -> State:
-    """Apply the given action to the current state."""
+    """Apply the given action to the current state. (Phase 1.2: Vectorized action application)"""
     current_player = state.current_player
     
-    def fold_action():
-        folded = state.folded.at[current_player].set(TRUE)
-        return state.replace(folded=folded)
+    # Create action masks
+    is_fold = action == FOLD
+    is_call = action == CALL
+    is_raise = action == RAISE
     
-    def call_action():
-        call_amount = state.max_bet - state.bets[current_player]
-        actual_call = jnp.minimum(call_amount, state.stacks[current_player])
-        
-        bets = state.bets.at[current_player].add(actual_call)
-        stacks = state.stacks.at[current_player].subtract(actual_call)
-        pot = state.pot + actual_call
-        all_in = state.all_in.at[current_player].set(stacks[current_player] == 0)
-        
-        return state.replace(bets=bets, stacks=stacks, pot=pot, all_in=all_in)
+    # Calculate amounts for call/raise actions
+    call_amount = state.max_bet - state.bets[current_player]
+    actual_call = jnp.minimum(call_amount, state.stacks[current_player])
     
-    def raise_action():
-        # When max_bet is 0, minimum raise is big_blind
-        # Otherwise, raise is double the current max bet
-        min_raise = jnp.where(state.max_bet == 0, state.big_blind, state.max_bet * 2)
-        raise_amount = min_raise - state.bets[current_player]
-        actual_raise = jnp.minimum(raise_amount, state.stacks[current_player])
-        
-        bets = state.bets.at[current_player].add(actual_raise)
-        stacks = state.stacks.at[current_player].subtract(actual_raise)
-        pot = state.pot + actual_raise
-        max_bet = jnp.maximum(state.max_bet, bets[current_player])
-        all_in = state.all_in.at[current_player].set(stacks[current_player] == 0)
-        last_raiser = current_player
-        
-        return state.replace(
-            bets=bets, stacks=stacks, pot=pot, max_bet=max_bet, 
-            all_in=all_in, last_raiser=last_raiser
-        )
+    min_raise = jnp.where(state.max_bet == 0, state.big_blind, state.max_bet * 2)
+    raise_amount = min_raise - state.bets[current_player]
+    actual_raise = jnp.minimum(raise_amount, state.stacks[current_player])
     
-    return jax.lax.switch(
-        action,
-        [fold_action, call_action, raise_action]
+    # Determine final amounts based on action
+    chips_to_add = jnp.where(is_call, actual_call, jnp.where(is_raise, actual_raise, 0))
+    
+    # Update state arrays
+    new_folded = state.folded.at[current_player].set(state.folded[current_player] | is_fold)
+    new_bets = state.bets.at[current_player].add(chips_to_add)
+    new_stacks = state.stacks.at[current_player].subtract(chips_to_add)
+    new_pot = state.pot + chips_to_add
+    new_max_bet = jnp.where(is_raise, jnp.maximum(state.max_bet, new_bets[current_player]), state.max_bet)
+    new_all_in = state.all_in.at[current_player].set(new_stacks[current_player] == 0)
+    new_last_raiser = jnp.where(is_raise, current_player, state.last_raiser)
+    
+    return state.replace(
+        folded=new_folded,
+        bets=new_bets,
+        stacks=new_stacks,
+        pot=new_pot,
+        max_bet=new_max_bet,
+        all_in=new_all_in,
+        last_raiser=new_last_raiser
     )
 
 
 def _is_betting_round_over(state: State) -> bool:
-    """Check if the current betting round is over."""
-    # Round is over if all active players have either folded, called, or are all-in
+    """Check if the current betting round is over. (Phase 3.1: Optimized betting logic)"""
+    # Precompute masks once
     player_mask = jnp.arange(MAX_PLAYERS) < state.num_players
     active_mask = (~state.folded & ~state.all_in & player_mask)[:MAX_PLAYERS]
-    active_players = jnp.sum(active_mask)
     
     # If less than 2 active players, round is over
-    round_over_few_players = active_players < 2
+    active_count = jnp.sum(active_mask)
     
-    # Check if all active players have bet the same amount
-    player_bets = jnp.where(player_mask, state.bets, state.max_bet)[:MAX_PLAYERS]
-    active_bets = jnp.where(active_mask, player_bets, state.max_bet)
-    all_bets_equal = jnp.all(active_bets == state.max_bet)
+    # For betting check, only compare bets of active players directly with max_bet
+    # This avoids creating intermediate arrays
+    active_bets_match_max = jnp.where(
+        active_mask, 
+        state.bets[:MAX_PLAYERS] == state.max_bet, 
+        True  # Inactive players don't affect the condition
+    )
+    all_active_called = jnp.all(active_bets_match_max)
     
-    # Also need to check that at least one action has been taken this round
-    # (to prevent immediate end at start of round)
-    round_over_all_called = all_bets_equal & (state.num_actions_this_round > 0)
-    
-    return round_over_few_players | round_over_all_called
+    # Combine conditions efficiently
+    return (active_count < 2) | (all_active_called & (state.num_actions_this_round > 0))
 
 
 def _advance_round(state: State) -> State:
@@ -311,26 +310,27 @@ def _next_player(state: State) -> State:
 
 
 def _get_next_active_player(state: State) -> int:
-    """Get the next active player (not folded or all-in)."""
+    """Get the next active player (not folded or all-in). (Phase 2.1: Vectorized player finding)"""
     current = state.current_player
     
-    # Create a mask for active players using static slicing
+    # Create a mask for active players
     player_mask = jnp.arange(MAX_PLAYERS) < state.num_players
     active_mask = (~state.folded & ~state.all_in & player_mask)[:MAX_PLAYERS]
     
-    # Create an array of potential next players
-    candidates = (current + 1 + jnp.arange(MAX_PLAYERS)) % MAX_PLAYERS
+    # Create priority array: higher values for players that come after current player
+    # Players after current get priority (MAX_PLAYERS - distance), others get (2*MAX_PLAYERS - distance)
+    distances = (jnp.arange(MAX_PLAYERS) - current - 1) % MAX_PLAYERS
+    priorities = jnp.where(
+        jnp.arange(MAX_PLAYERS) > current,
+        MAX_PLAYERS - distances,
+        2 * MAX_PLAYERS - distances
+    )
     
-    # Use scan to find first active player
-    def find_active(carry, i):
-        found, player = carry
-        candidate = candidates[i]
-        is_candidate_active = active_mask[candidate] & (candidate < state.num_players)
-        new_found = found | is_candidate_active
-        new_player = jax.lax.select(found, player, candidate)
-        return (new_found, new_player), None
+    # Set inactive players to have very low priority
+    priorities = jnp.where(active_mask, priorities, -1)
     
-    (found, next_player), _ = jax.lax.scan(find_active, (FALSE, current), jnp.arange(MAX_PLAYERS))
+    # Find player with highest priority (closest active player after current)
+    next_player = jnp.argmax(priorities)
     
     return next_player
 
@@ -339,57 +339,43 @@ def _get_first_player_for_round(state: State, round: int) -> int:
     """Get the first player to act in a given round."""
     # In post-flop rounds, small blind acts first
     # Preflop: player after big blind acts first
-    start_pos = jax.lax.select(round > 0, 0, 2 % state.num_players)
+    start_pos = jnp.where(round > 0, 0, 2 % state.num_players)
     return _get_next_active_player_from(state, start_pos)
 
 
 def _get_next_active_player_from(state: State, start_pos: int) -> int:
-    """Get next active player starting from a position."""
-    # Use static slicing with MAX_PLAYERS and then mask by num_players
+    """Get next active player starting from a position. (Phase 2.1: Vectorized player finding)"""
+    # Create a mask for active players
     player_mask = jnp.arange(MAX_PLAYERS) < state.num_players
     active_mask = (~state.folded & ~state.all_in & player_mask)[:MAX_PLAYERS]
     
-    # Create an array of potential players
-    candidates = (start_pos + jnp.arange(MAX_PLAYERS)) % MAX_PLAYERS
+    # Create priority array: higher values for players that come after start_pos
+    distances = (jnp.arange(MAX_PLAYERS) - start_pos) % MAX_PLAYERS
+    priorities = MAX_PLAYERS - distances
     
-    # Use scan to find first active player
-    def find_active(carry, i):
-        found, player = carry
-        candidate = candidates[i]
-        is_candidate_active = active_mask[candidate] & (candidate < state.num_players)
-        new_found = found | is_candidate_active
-        new_player = jax.lax.select(found, player, candidate)
-        return (new_found, new_player), None
+    # Set inactive players to have very low priority
+    priorities = jnp.where(active_mask, priorities, -1)
     
-    (found, next_player), _ = jax.lax.scan(find_active, (FALSE, start_pos), jnp.arange(MAX_PLAYERS))
+    # Find player with highest priority (closest active player from start_pos)
+    next_player = jnp.argmax(priorities)
     
     return next_player
 
 
 def _get_legal_actions(state: State) -> Array:
-    """Get legal actions for current player."""
-    terminated_actions = jnp.zeros(3, dtype=jnp.bool_)
+    """Get legal actions for current player. (Phase 4: Batch legal action computation)"""
+    current_player = state.current_player
     
-    def get_active_actions():
-        current_player = state.current_player
-        
-        # Can always fold (unless already all-in)
-        can_fold = ~state.all_in[current_player]
-        
-        # Can call if there's a bet to call and player has chips
-        can_call = (state.bets[current_player] < state.max_bet) & (state.stacks[current_player] > 0)
-        
-        # Can raise if total chips (stack + current bet) is more than max bet
-        total_chips = state.stacks[current_player] + state.bets[current_player]
-        can_raise = total_chips > state.max_bet
-        
-        return jnp.array([can_fold, can_call, can_raise], dtype=jnp.bool_)
+    # Calculate legal actions regardless of termination state
+    can_fold = ~state.all_in[current_player]
+    can_call = (state.bets[current_player] < state.max_bet) & (state.stacks[current_player] > 0)
+    total_chips = state.stacks[current_player] + state.bets[current_player]
+    can_raise = total_chips > state.max_bet
     
-    return jax.lax.cond(
-        state.terminated,
-        lambda: terminated_actions,
-        get_active_actions
-    )
+    active_actions = jnp.array([can_fold, can_call, can_raise], dtype=jnp.bool_)
+    
+    # If terminated, return all False; otherwise return computed actions
+    return jnp.where(state.terminated, False, active_actions)
 
 
 def _calculate_rewards(state: State) -> Array:
@@ -403,60 +389,42 @@ def _calculate_rewards(state: State) -> Array:
     active_mask = (~state.folded[:rewards_shape] & player_mask)
     num_active = jnp.sum(active_mask)
     
-    # If only one player remains, they win the pot
-    def single_winner():
-        winner = jnp.argmax(active_mask)
-        return rewards.at[winner].set(state.pot)
+    # Vectorized reward calculation (Phase 2.2: Eliminate nested conditionals)
+    is_single_winner = num_active == 1
+    reached_showdown = state.round >= 4
+    is_showdown = (~is_single_winner) & reached_showdown
+    is_equal_split = (~is_single_winner) & (~reached_showdown)
     
-    # If multiple players remain, determine winner by hand strength
-    def multiple_winners():
-        # Optimization #2: Only evaluate hands if game reached showdown (round >= 4)
-        # If game ended before showdown, split pot equally among active players
-        reached_showdown = state.round >= 4
-        # Debug: Print the round when this is called
-        # jax.debug.print("_calculate_rewards called: round={}, reached_showdown={}", state.round, reached_showdown)
-        
-        def showdown_evaluation():
-            # Evaluate hand strengths for active players using vectorized operations
-            def eval_player_hand(p):
-                # Only evaluate if player is in range and active
-                in_range = p < state.num_players
-                return jax.lax.cond(
-                    active_mask[p] & in_range,
-                    lambda: _evaluate_hand(state.hole_cards[p], state.board_cards, state.round),
-                    lambda: jnp.int32(-1)  # Folded players get -1
-                )
-            
-            hand_strengths = jax.vmap(eval_player_hand)(jnp.arange(rewards_shape))
-            
-            # Find the best hand strength among active players
-            best_strength = jnp.max(jnp.where(active_mask, hand_strengths, -1))
-            
-            # All players with best strength split the pot
-            winners_mask = (hand_strengths == best_strength) & active_mask
-            num_winners = jnp.sum(winners_mask)
-            pot_share = state.pot // jnp.maximum(num_winners, 1)  # Avoid division by zero
-            
-            return jnp.where(winners_mask, pot_share, 0.0).astype(jnp.float32)
-        
-        def equal_split():
-            # Split pot equally among all active players (no hand evaluation needed)
-            num_winners = jnp.sum(active_mask)
-            pot_share = state.pot // jnp.maximum(num_winners, 1)  # Avoid division by zero
-            # Debug: Print when this path is taken
-            # jax.debug.print("Using equal_split: round={}, pot={}, num_winners={}", state.round, state.pot, num_winners)
-            return jnp.where(active_mask, pot_share, 0.0).astype(jnp.float32)
-        
-        return jax.lax.cond(
-            reached_showdown,
-            showdown_evaluation,
-            equal_split
+    # Single winner case: winner gets all the pot
+    single_winner_idx = jnp.argmax(active_mask)
+    single_winner_rewards = jnp.zeros(rewards_shape, dtype=jnp.float32).at[single_winner_idx].set(state.pot)
+    
+    # Showdown case: evaluate hands and award based on strength
+    def eval_player_hand(p):
+        in_range = p < state.num_players
+        return jnp.where(
+            active_mask[p] & in_range,
+            _evaluate_hand(state.hole_cards[p], state.board_cards, state.round),
+            jnp.int32(-1)  # Inactive players get -1
         )
     
-    final_rewards = jax.lax.cond(
-        num_active == 1,
-        single_winner,
-        multiple_winners
+    hand_strengths = jax.vmap(eval_player_hand)(jnp.arange(rewards_shape))
+    best_strength = jnp.max(jnp.where(active_mask, hand_strengths, -1))
+    showdown_winners_mask = (hand_strengths == best_strength) & active_mask
+    showdown_num_winners = jnp.sum(showdown_winners_mask)
+    showdown_pot_share = state.pot // jnp.maximum(showdown_num_winners, 1)
+    showdown_rewards = jnp.where(showdown_winners_mask, showdown_pot_share, 0.0).astype(jnp.float32)
+    
+    # Equal split case: split pot among all active players
+    equal_num_winners = jnp.sum(active_mask)
+    equal_pot_share = state.pot // jnp.maximum(equal_num_winners, 1)
+    equal_split_rewards = jnp.where(active_mask, equal_pot_share, 0.0).astype(jnp.float32)
+    
+    # Select final rewards based on case
+    final_rewards = jnp.where(
+        is_single_winner,
+        single_winner_rewards,
+        jnp.where(is_showdown, showdown_rewards, equal_split_rewards)
     )
     
     return final_rewards
@@ -478,7 +446,7 @@ def _evaluate_hand(hole_cards: Array, board_cards: Array, round: int) -> int:
     num_board_cards = jnp.array([0, 3, 4, 5], dtype=jnp.int32)  # Cumulative counts
     
     # Get number of visible board cards for this round
-    num_visible = jax.lax.select(round >= 4, 5, num_board_cards[round])
+    num_visible = jnp.where(round >= 4, 5, num_board_cards[round])
     
     # Create a mask for visible board cards
     visible_mask = jnp.arange(5) < num_visible
@@ -487,19 +455,12 @@ def _evaluate_hand(hole_cards: Array, board_cards: Array, round: int) -> int:
     # Combine hole cards and visible board cards
     all_cards = jnp.concatenate([hole_cards[:2], visible_board])
     
-    # For preflop, just return high card value to avoid evaluating incomplete hands
-    def preflop_eval():
-        return jnp.max(hole_cards[:2])
+    # Unified hand evaluation (Phase 4: Batch hand evaluation)
+    # For preflop, use high card value; otherwise use full evaluation
+    preflop_value = jnp.max(hole_cards[:2])
+    postflop_value = evaluate_hand_jax(all_cards)
     
-    def postflop_eval():
-        # Use proper hand evaluation with all cards (including -1 padding)
-        return evaluate_hand_jax(all_cards)
-    
-    return jax.lax.cond(
-        num_visible == 0,  # Preflop
-        preflop_eval,
-        postflop_eval
-    )
+    return jnp.where(num_visible == 0, preflop_value, postflop_value)
 
 
 def _observe(state: State, player_id: int) -> Array:
@@ -523,53 +484,45 @@ def _observe(state: State, player_id: int) -> Array:
         4     # Round (one-hot)
     )
     
+    # Vectorized observation encoding (Phase 3.2: Eliminate loops and conditionals)
     obs = jnp.zeros(obs_size, dtype=jnp.float32)
-    idx = 0
     
-    # Own hole cards - create one-hot encoding
-    hole_cards = state.hole_cards[player_id, :2]
-    for i in range(2):
-        card = hole_cards[i]
-        valid = card >= 0
-        safe_card = jnp.clip(card, 0, 51)  # Ensure valid index
-        obs = obs.at[idx + safe_card].set(obs[idx + safe_card] + jnp.where(valid, 1.0, 0.0))
-    idx += 52
-    
-    # Visible board cards
-    # Cumulative board cards: preflop=0, flop=3, turn=4, river=5
-    num_board_cards = jnp.array([0, 3, 4, 5], dtype=jnp.int32)
-    num_visible = jax.lax.select(state.round >= 4, 5, num_board_cards[state.round])
-    
-    for i in range(5):
-        visible = i < num_visible
-        card = state.board_cards[i]
-        valid = (card >= 0) & visible
-        safe_card = jnp.clip(card, 0, 51)  # Ensure valid index
-        obs = obs.at[idx + safe_card].set(obs[idx + safe_card] + jnp.where(valid, 1.0, 0.0))
-    idx += 52
-    
-    # Pot size (normalized by total chips in game)
+    # Precompute common values
     total_chips = jnp.sum(state.stacks) + state.pot
-    obs = obs.at[idx].set(state.pot / jnp.maximum(total_chips, 1))
-    idx += 1
+    safe_total_chips = jnp.maximum(total_chips, 1)
+    safe_pot = jnp.maximum(state.pot, 1)
     
-    # Own stack (normalized)
-    obs = obs.at[idx].set(state.stacks[player_id] / jnp.maximum(total_chips, 1))
-    idx += 1
+    # Own hole cards - vectorized one-hot encoding
+    hole_cards = state.hole_cards[player_id, :2]
+    valid_holes = hole_cards >= 0
+    safe_holes = jnp.clip(hole_cards, 0, 51)
+    hole_indices = jnp.where(valid_holes, safe_holes, 52)  # Use out-of-bounds for invalid
+    obs = obs.at[hole_indices].add(valid_holes.astype(jnp.float32))
     
-    # Current bets (normalized)
-    for i in range(MAX_PLAYERS):
-        obs = obs.at[idx + i].set(state.bets[i] / jnp.maximum(state.pot, 1))
-    idx += MAX_PLAYERS
+    # Visible board cards - vectorized
+    num_board_cards = jnp.array([0, 3, 4, 5], dtype=jnp.int32)
+    num_visible = jnp.where(state.round >= 4, 5, num_board_cards[state.round])
+    board_cards = state.board_cards[:5]
+    visible_mask = jnp.arange(5) < num_visible
+    valid_board = (board_cards >= 0) & visible_mask
+    safe_board = jnp.clip(board_cards, 0, 51)
+    board_indices = jnp.where(valid_board, safe_board + 52, obs_size)  # Offset by 52, use out-of-bounds for invalid
+    obs = obs.at[board_indices].add(valid_board.astype(jnp.float32))
     
-    # Folded status
-    for i in range(MAX_PLAYERS):
-        obs = obs.at[idx + i].set(state.folded[i])
-    idx += MAX_PLAYERS
+    # Build observation array in segments
+    segments = [
+        # Pot and stack (normalized)
+        jnp.array([state.pot / safe_total_chips, state.stacks[player_id] / safe_total_chips]),
+        # Current bets (normalized)
+        state.bets[:MAX_PLAYERS] / safe_pot,
+        # Folded status
+        state.folded[:MAX_PLAYERS].astype(jnp.float32),
+        # Current round (one-hot)
+        jnp.eye(4)[jnp.clip(state.round, 0, 3)] * (state.round < 4)
+    ]
     
-    # Current round (one-hot)
-    valid_round = state.round < 4
-    safe_round = jnp.clip(state.round, 0, 3)
-    obs = obs.at[idx + safe_round].set(jnp.where(valid_round, 1.0, 0.0))
+    # Concatenate all segments efficiently
+    numeric_obs = jnp.concatenate(segments)
+    obs = obs.at[104:].set(numeric_obs)  # Start after the 2x52 card sections
     
     return obs
