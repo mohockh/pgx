@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import sys
 import os
 
-from pgx.poker_eval.jax_evaluator_new import evaluate_hand_jax as evaluate_hand
+from pgx.poker_eval.jax_evaluator_new import evaluate_hand_cards as evaluate_hand
 from pgx.poker_eval.cardset import parse_card, hand_class, hand_description
 # For now, create simple implementations for missing functions
 def batch_evaluate(hands):

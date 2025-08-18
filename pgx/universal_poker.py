@@ -456,14 +456,11 @@ def _evaluate_hand(hole_cardset: jnp.ndarray, board_cardset: jnp.ndarray, round:
     # Combine hole cards and visible board cards using bitwise OR
     combined_cardset = cardset_or(hole_cardset, visible_board_cardset)
     
-    # Convert combined cardset to array for evaluator
-    all_cards = cardset_to_cards(combined_cardset)[:7]  # Take first 7 cards
-    
-    # Unified hand evaluation (Phase 4: Batch hand evaluation)
+    # Optimized hand evaluation: work directly with cardsets
     # For preflop, use high card value; otherwise use full evaluation
-    hole_cards = cardset_to_cards(hole_cardset)[:2]  # Take first 2 cards
+    hole_cards = cardset_to_cards(hole_cardset)[:2]  # Take first 2 cards for preflop only
     preflop_value = jnp.max(hole_cards)
-    postflop_value = evaluate_hand(all_cards)
+    postflop_value = evaluate_hand(combined_cardset)  # Direct cardset evaluation
     
     return jnp.where(num_visible == 0, preflop_value, postflop_value)
 

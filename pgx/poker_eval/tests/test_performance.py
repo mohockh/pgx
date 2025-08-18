@@ -10,37 +10,41 @@ import jax.numpy as jnp
 import sys
 import os
 
-from pgx.poker_eval.jax_evaluator_new import evaluate_hand_jax
+from pgx.poker_eval.jax_evaluator_new import evaluate_hand
+from pgx.poker_eval.cardset import cards_to_cardset
 from pgx.universal_poker import UniversalPoker
 
 
-def generate_test_hands(num_hands: int, key: jax.random.PRNGKey):
-    """Generate random 7-card hands - vectorized version."""
+def generate_test_cardsets(num_hands: int, key: jax.random.PRNGKey):
+    """Generate random 7-card hands as cardsets - vectorized version."""
     # Split keys for each hand
     keys = jax.random.split(key, num_hands)
     
-    # Vectorized card generation - just return 7 cards per hand
-    def generate_single_hand(single_key):
-        return jax.random.choice(single_key, 52, shape=(7,), replace=False)
+    # Vectorized cardset generation
+    def generate_single_cardset(single_key):
+        # Generate 7 unique cards
+        cards = jax.random.choice(single_key, 52, shape=(7,), replace=False)
+        # Convert to cardset
+        return cards_to_cardset(cards)
     
     # Use vmap to vectorize across all hands
-    all_cards = jax.vmap(generate_single_hand)(keys)
+    all_cardsets = jax.vmap(generate_single_cardset)(keys)
     
-    return all_cards
+    return all_cardsets
 
 def benchmark_evaluators(num_hands: int = 1000, chunk_size: int = 100000):
-    """Benchmark hand evaluator with chunking for memory efficiency."""
+    """Benchmark cardset-based hand evaluator with chunking for memory efficiency."""
     chunk_size = min(num_hands, chunk_size)
-    print(f"Benchmarking hand evaluation with {num_hands} hands (chunk_size={chunk_size})...")
+    print(f"Benchmarking cardset hand evaluation with {num_hands} hands (chunk_size={chunk_size})...")
     
     # Compile function once
-    eval_jit = jax.jit(jax.vmap(evaluate_hand_jax))
+    eval_jit = jax.jit(jax.vmap(evaluate_hand))
     
     # Warm up with small batch
     print("Warming up...")
     key = jax.random.PRNGKey(42)
-    warmup_cards = generate_test_hands(chunk_size, key)
-    _ = eval_jit(warmup_cards)
+    warmup_cardsets = generate_test_cardsets(chunk_size, key)
+    _ = eval_jit(warmup_cardsets)
     
     # Calculate number of chunks
     num_chunks = (num_hands + chunk_size - 1) // chunk_size
@@ -57,10 +61,10 @@ def benchmark_evaluators(num_hands: int = 1000, chunk_size: int = 100000):
         
         # Generate chunk data
         chunk_key = jax.random.split(key, num_chunks)[chunk_idx]
-        chunk_cards = generate_test_hands(current_chunk_size, chunk_key)
+        chunk_cardsets = generate_test_cardsets(current_chunk_size, chunk_key)
         
         # Evaluate chunk
-        chunk_results = eval_jit(chunk_cards)
+        chunk_results = eval_jit(chunk_cardsets)
         total_results.append(chunk_results)
         
         if chunk_idx % max(1, num_chunks // 10) == 0:
@@ -72,14 +76,14 @@ def benchmark_evaluators(num_hands: int = 1000, chunk_size: int = 100000):
     first_chunk_results = total_results[0] if total_results else jnp.array([])
     
     print(f"\nResults:")
-    print(f"Evaluator: {eval_time:.4f}s ({num_hands/eval_time:.0f} hands/sec)")
+    print(f"Cardset Evaluator: {eval_time:.4f}s ({num_hands/eval_time:.0f} hands/sec)")
     print(f"Sample results: {first_chunk_results[:5] if len(first_chunk_results) >= 5 else first_chunk_results}")
     
     return eval_time
 
 def test_universal_poker_performance(batch_size: int = 100):
     """Test performance with the actual Universal Poker environment."""
-    print("\nTesting Universal Poker performance with new evaluator...")
+    print("\nTesting Universal Poker performance with cardset evaluator...")
     
     env = UniversalPoker(num_players=2, stack_size=100)
     

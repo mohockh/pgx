@@ -8,7 +8,7 @@ for perfect compatibility and correctness.
 import jax
 import jax.numpy as jnp
 
-from .cardset import cards_to_suit_patterns
+from .cardset import extract_suit_ranks
 from .tables.constants import (
     HANDCLASS_STRAIGHT_FLUSH, HANDCLASS_QUADS, HANDCLASS_FULL_HOUSE,
     HANDCLASS_FLUSH, HANDCLASS_STRAIGHT, HANDCLASS_TRIPS,
@@ -20,19 +20,19 @@ from .tables.pair_other_val import PAIR_OTHER_VAL
 from .tables.trips_other_val import TRIPS_OTHER_VAL
 
 @jax.jit
-def evaluate_hand(cards: jnp.ndarray, num_suits: int = 4) -> int:
+def evaluate_hand(cardset: jnp.ndarray, num_suits: int = 4) -> int:
     """
     Main hand evaluation function using C ACPC algorithm.
-    Flattened JAX implementation with reduced conditionals.
+    Optimized to work directly with cardset representation.
     
     Args:
-        cards: Array of card IDs (0-51), can be padded with -1
+        cardset: uint32[2] cardset array
         
     Returns:
         Hand strength value (higher = better), exactly matching C implementation
     """
-    # Convert cards to C-style bySuit representation
-    by_suit = cards_to_suit_patterns(cards)
+    # Direct conversion: cardset → suit patterns (skip cards entirely)
+    by_suit = extract_suit_ranks(cardset)
     
     # Step 1: Pre-compute all values
     by_suit_values = jnp.take(by_suit, jnp.arange(num_suits), unique_indices=True, indices_are_sorted=True)
@@ -140,6 +140,23 @@ def evaluate_hand(cards: jnp.ndarray, num_suits: int = 4) -> int:
     result = jax.lax.select(is_straight_flush, straight_flush_val, result)
     
     return result
+
+
+@jax.jit  
+def evaluate_hand_cards(cards: jnp.ndarray) -> int:
+    """
+    Legacy wrapper for tests - converts cards to cardset first.
+    
+    Args:
+        cards: Array of card IDs (0-51), can be padded with -1
+        
+    Returns:
+        Hand strength value (higher = better)
+    """
+    from .cardset import cards_to_cardset
+    cardset = cards_to_cardset(cards)
+    return evaluate_hand(cardset)
+
 
 @jax.jit
 def jnp_top_bit(value: jnp.uint16) -> jnp.uint16:

@@ -166,9 +166,9 @@ def cardset_and_mask_parts(cardset: jnp.ndarray, mask_low_uint32: int, mask_high
 
 def cardset_and_mask(cardset: jnp.ndarray, mask: int) -> jnp.ndarray:
     """Bitwise AND with 64-bit integer mask (uint32[2]) - convenience function."""
-    mask_low = mask & 0xFFFFFFFF
-    mask_high = mask >> 32
-    return cardset_and_mask_parts(cardset, mask_low, mask_high)
+    # Use create_cardset_from_value to properly handle large mask values
+    mask_cardset = create_cardset_from_value(mask)
+    return cardset_and(cardset, mask_cardset)
 
 
 @jax.jit
