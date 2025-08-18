@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import pgx.core as core
 from pgx._src.struct import dataclass
 from pgx._src.types import Array, PRNGKey
+from .poker_eval.jax_evaluator_new import evaluate_hand
 
 FALSE = jnp.bool_(False)
 TRUE = jnp.bool_(True)
@@ -432,15 +433,6 @@ def _calculate_rewards(state: State) -> Array:
 
 def _evaluate_hand(hole_cards: Array, board_cards: Array, round: int) -> int:
     """Evaluate hand strength using proper poker hand evaluation."""
-    # Import the evaluator (done inside function to avoid circular imports)
-    try:
-        from .poker_eval.jax_evaluator import evaluate_hand_jax
-    except ImportError:
-        # Fallback for relative import issues
-        import sys
-        import os
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
-        from poker_eval.jax_evaluator import evaluate_hand_jax
     
     # Number of board cards visible in each round: preflop=0, flop=3, turn=4, river=5
     num_board_cards = jnp.array([0, 3, 4, 5], dtype=jnp.int32)  # Cumulative counts
@@ -458,7 +450,7 @@ def _evaluate_hand(hole_cards: Array, board_cards: Array, round: int) -> int:
     # Unified hand evaluation (Phase 4: Batch hand evaluation)
     # For preflop, use high card value; otherwise use full evaluation
     preflop_value = jnp.max(hole_cards[:2])
-    postflop_value = evaluate_hand_jax(all_cards)
+    postflop_value = evaluate_hand(all_cards)
     
     return jnp.where(num_visible == 0, preflop_value, postflop_value)
 

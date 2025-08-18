@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import sys
 import os
 
-from universal_poker import UniversalPoker, FOLD, CALL, RAISE
+from pgx.universal_poker import UniversalPoker, FOLD, CALL, RAISE
 
 
 def play_random_hands_vectorized(env, keys):

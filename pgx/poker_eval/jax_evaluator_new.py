@@ -7,6 +7,7 @@ for perfect compatibility and correctness.
 
 import jax
 import jax.numpy as jnp
+
 from .cardset import cards_to_suit_patterns
 from .tables.constants import (
     HANDCLASS_STRAIGHT_FLUSH, HANDCLASS_QUADS, HANDCLASS_FULL_HOUSE,
@@ -19,8 +20,9 @@ from .tables.pair_other_val import PAIR_OTHER_VAL
 from .tables.trips_other_val import TRIPS_OTHER_VAL
 
 @jax.jit
-def rank_cardset_jax(cards: jnp.ndarray, num_suits: int = 4) -> int:
+def evaluate_hand(cards: jnp.ndarray, num_suits: int = 4) -> int:
     """
+    Main hand evaluation function using C ACPC algorithm.
     Flattened JAX implementation with reduced conditionals.
     
     Args:
@@ -151,16 +153,3 @@ def jnp_top_bit(value: jnp.uint16) -> jnp.uint16:
     value |= value >> 8
     return (jnp.bitwise_count(value) - 1).astype(jnp.uint16)
 
-# Main evaluation function that matches the original interface
-@jax.jit
-def evaluate_hand_jax(cards: jnp.ndarray) -> int:
-    """
-    Main hand evaluation function using C ACPC algorithm.
-    
-    Args:
-        cards: Array of card IDs (0-51), can be padded with -1
-        
-    Returns:
-        Hand strength value (higher = better)
-    """
-    return rank_cardset_jax(cards)
