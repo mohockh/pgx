@@ -39,9 +39,10 @@ class TestUniversalPoker:
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
-        # Each player should have 2 hole cards
+        # Each player should have 2 hole cards (convert from cardset)
+        from pgx.poker_eval.cardset import cardset_to_cards
         for p in range(state.num_players):
-            hole_cards = state.hole_cards[p, :2]
+            hole_cards = cardset_to_cards(state.hole_cardsets[p])[:2]  # Take first 2
             assert jnp.all(hole_cards >= 0)  # Valid card indices
             assert jnp.all(hole_cards < 52)  # Within deck range
             
@@ -52,7 +53,8 @@ class TestUniversalPoker:
         state = env.init(key)
         
         # 5 board cards should be dealt (but not visible in preflop)
-        board_cards = state.board_cards[:5]
+        from pgx.poker_eval.cardset import cardset_to_cards
+        board_cards = cardset_to_cards(state.board_cardset)[:5]  # Take first 5
         assert jnp.all(board_cards >= 0)
         assert jnp.all(board_cards < 52)
         
@@ -162,11 +164,16 @@ class TestUniversalPoker:
             
             # Check observation is proper array
             assert isinstance(obs, jnp.ndarray)
-            assert obs.dtype == jnp.float32
+            # New format uses mixed int64/int32 types, so we check the overall type
+            assert obs.dtype in [jnp.int64, jnp.int32]  # Concatenation promotes to consistent type
             
-            # Check reasonable observation size
-            expected_size = 52 + 52 + 1 + 1 + 10 + 10 + 4  # See _observe function
+            # Check new observation size: [hole_cardset, board_cardset, pot, stack, bets[10], folded[10], round]
+            expected_size = 1 + 1 + 1 + 1 + 10 + 10 + 1  # cardsets + game state
             assert len(obs) == expected_size
+            
+            # Verify cardset components are present (first two elements)
+            assert obs[0] >= 0  # hole cardset (uint64 cast to int64)
+            assert obs[1] >= 0  # board cardset (could be 0 in preflop)
             
     def test_rewards_on_termination(self):
         """Test reward calculation when game terminates."""
@@ -190,8 +197,9 @@ class TestUniversalPoker:
         assert state.num_players == 4
         
         # All players should have hole cards
+        from pgx.poker_eval.cardset import cardset_to_cards
         for p in range(4):
-            hole_cards = state.hole_cards[p, :2]
+            hole_cards = cardset_to_cards(state.hole_cardsets[p])[:2]  # Take first 2
             assert jnp.all(hole_cards >= 0)
             
     def test_game_properties(self):
@@ -252,8 +260,8 @@ class TestUniversalPoker:
         state2 = env.init(key)
         
         # States should be identical
-        assert jnp.array_equal(state1.hole_cards, state2.hole_cards)
-        assert jnp.array_equal(state1.board_cards, state2.board_cards)
+        assert jnp.array_equal(state1.hole_cardsets, state2.hole_cardsets)
+        assert state1.board_cardset == state2.board_cardset
         assert state1.pot == state2.pot
         
     def test_state_consistency(self):

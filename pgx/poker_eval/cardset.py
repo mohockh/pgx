@@ -9,6 +9,9 @@ import jax
 import jax.numpy as jnp
 from typing import Union, List, Tuple
 
+# Maximum number of cards that can be extracted from a cardset
+MAX_CARDS_IN_CARDSET = 10
+
 def card_to_id(suit: int, rank: int) -> int:
     """
     Convert suit and rank to card ID.
@@ -35,9 +38,9 @@ def id_to_card(card_id: int) -> Tuple[int, int]:
     return card_id // 13, card_id % 13
 
 @jax.jit
-def cards_to_cardset(cards: jnp.ndarray) -> int:
+def cards_to_cardset(cards: jnp.ndarray) -> jnp.uint64:
     """
-    Convert array of card IDs to ACPC cardset representation.
+    Convert array of card IDs to ACPC cardset representation using vectorized operations.
     
     Args:
         cards: Array of card IDs
@@ -45,22 +48,24 @@ def cards_to_cardset(cards: jnp.ndarray) -> int:
     Returns:
         64-bit cardset integer
     """
-    cardset = 0
+    # Filter out invalid cards (-1)
+    valid_mask = cards >= 0
+    valid_cards = jnp.where(valid_mask, cards, 0).astype(jnp.uint64)
     
-    def add_card(carry, card_id):
-        cardset, = carry
-        # Convert card_id to suit and rank
-        suit = card_id // 13
-        rank = card_id % 13
-        
-        # ACPC format: bit position = (suit << 4) + rank
-        bit_pos = (suit << 4) + rank
-        new_cardset = cardset | (1 << bit_pos)
-        
-        return (new_cardset,), None
+    # Convert to suits and ranks (vectorized)
+    suits = valid_cards // 13
+    ranks = valid_cards % 13
     
-    (final_cardset,), _ = jax.lax.scan(add_card, (cardset,), cards)
-    return final_cardset
+    # Calculate bit positions: (suit << 4) + rank
+    bit_positions = (suits << 4) + ranks
+    
+    # Create bit masks for each card
+    bit_masks = jnp.where(valid_mask, jnp.uint64(1) << bit_positions, jnp.uint64(0))
+    
+    # OR all bit masks together to create final cardset
+    cardset = jnp.bitwise_or.reduce(bit_masks)
+    
+    return cardset
 
 @jax.jit
 def extract_suit_ranks(cardset: int) -> jnp.ndarray:
@@ -283,3 +288,53 @@ def format_hand(cards: List[int]) -> str:
         String like "As Kh Qd Jc Ts"
     """
     return " ".join(format_card(card) for card in cards)
+
+@jax.jit
+def cardset_to_cards(cardset: jnp.uint64) -> jnp.ndarray:
+    """
+    Convert cardset back to array of card IDs.
+    
+    Args:
+        cardset: 64-bit cardset integer
+        
+    Returns:
+        Array of card IDs, padded with -1 for empty slots
+        Always returns MAX_CARDS_IN_CARDSET cards
+    """
+    cards = jnp.full(MAX_CARDS_IN_CARDSET, -1, dtype=jnp.int32)
+    card_count = 0
+    
+    # Check each possible card (0-51)
+    for card_id in range(52):
+        bit_pos = (card_id // 13) * 16 + (card_id % 13)  # ACPC bit position
+        has_card = (cardset >> bit_pos) & 1
+        
+        # If card is present and we have space, add it
+        new_count = card_count + has_card
+        cards = jnp.where(
+            (has_card > 0) & (card_count < MAX_CARDS_IN_CARDSET),
+            cards.at[card_count].set(card_id),
+            cards
+        )
+        card_count = jnp.where(new_count <= MAX_CARDS_IN_CARDSET, new_count, card_count)
+    
+    return cards
+
+@jax.jit
+def add_card_to_cardset(cardset: jnp.uint64, card_id: int) -> jnp.uint64:
+    """
+    Add a single card to a cardset.
+    
+    Args:
+        cardset: Existing cardset
+        card_id: Card ID to add (0-51)
+        
+    Returns:
+        Updated cardset with card added
+    """
+    # ACPC format: bit position = (suit << 4) + rank
+    suit = card_id // 13
+    rank = card_id % 13
+    bit_pos = (suit << 4) + rank
+    
+    return cardset | jnp.uint64(1 << bit_pos)

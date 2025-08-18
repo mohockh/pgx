@@ -5,6 +5,7 @@ import pgx.core as core
 from pgx._src.struct import dataclass
 from pgx._src.types import Array, PRNGKey
 from .poker_eval.jax_evaluator_new import evaluate_hand
+from .poker_eval.cardset import cards_to_cardset, cardset_to_cards, add_card_to_cardset
 
 FALSE = jnp.bool_(False)
 TRUE = jnp.bool_(True)
@@ -54,9 +55,9 @@ class State(core.State):
     folded: Array = jnp.zeros(MAX_PLAYERS, dtype=jnp.bool_)
     all_in: Array = jnp.zeros(MAX_PLAYERS, dtype=jnp.bool_)
     
-    # Cards
-    hole_cards: Array = jnp.full((MAX_PLAYERS, 3), -1, dtype=jnp.int32)  # Allow up to 3 hole cards
-    board_cards: Array = jnp.full(7, -1, dtype=jnp.int32)  # Max 7 board cards
+    # Cards (using cardset representation for memory efficiency)
+    hole_cardsets: Array = jnp.zeros(MAX_PLAYERS, dtype=jnp.uint64)  # Each player's hole cards as cardset
+    board_cardset: Array = jnp.uint64(0)  # Board cards as single cardset
     
     # Betting info
     first_player: Array = jnp.array([1, 0, 0, 0], dtype=jnp.int32)  # first to act each round
@@ -121,28 +122,29 @@ def _init(rng: PRNGKey, num_players: int, stack_size: int, small_blind: int, big
     stacks = stacks.at[0].subtract(small_blind)
     stacks = stacks.at[1].subtract(big_blind)
     
-    pot = small_blind + big_blind
-    max_bet = big_blind
+    pot = jnp.int32(small_blind + big_blind)
+    max_bet = jnp.int32(big_blind)
     
-    # Deal hole cards
+    # Deal hole cards using cardset representation
     rng, subkey = jax.random.split(rng)
     deck = jax.random.permutation(subkey, jnp.arange(52))
     
-    hole_cards = jnp.full((MAX_PLAYERS, 3), -1, dtype=jnp.int32)
+    hole_cardsets = jnp.zeros(MAX_PLAYERS, dtype=jnp.uint64)
     card_idx = 0
-    for p in range(num_players):
-        for i in range(2):  # Deal 2 hole cards per player
-            hole_cards = hole_cards.at[p, i].set(deck[card_idx])
-            card_idx += 1
     
-    # Deal board cards (will be revealed in later rounds)
-    board_cards = jnp.full(7, -1, dtype=jnp.int32)
-    for i in range(5):  # Deal 5 board cards total
-        board_cards = board_cards.at[i].set(deck[card_idx])
-        card_idx += 1
+    # Deal 2 hole cards to each player
+    for p in range(num_players):
+        player_cards = deck[card_idx:card_idx+2]
+        hole_cardsets = hole_cardsets.at[p].set(cards_to_cardset(player_cards))
+        card_idx += 2
+    
+    # Deal 5 board cards
+    board_cards = deck[card_idx:card_idx+5]
+    board_cardset = cards_to_cardset(board_cards)
+    card_idx += 5
     
     # Determine first player to act (after big blind in preflop)
-    current_player = (2 % num_players) if num_players > 2 else 0
+    current_player = jnp.int32((2 % num_players) if num_players > 2 else 0)
     
     state = State(
         num_players=jnp.int32(num_players),
@@ -150,8 +152,8 @@ def _init(rng: PRNGKey, num_players: int, stack_size: int, small_blind: int, big
         bets=bets,
         pot=pot,
         max_bet=max_bet,
-        hole_cards=hole_cards,
-        board_cards=board_cards,
+        hole_cardsets=hole_cardsets,
+        board_cardset=board_cardset,
         current_player=jnp.int32(current_player),
         small_blind=jnp.int32(small_blind),
         big_blind=jnp.int32(big_blind),
@@ -223,25 +225,25 @@ def _apply_action(state: State, action: int) -> State:
     is_call = action == CALL
     is_raise = action == RAISE
     
-    # Calculate amounts for call/raise actions
-    call_amount = state.max_bet - state.bets[current_player]
+    # Calculate amounts for call/raise actions (ensure int32 types)
+    call_amount = jnp.int32(state.max_bet - state.bets[current_player])
     actual_call = jnp.minimum(call_amount, state.stacks[current_player])
     
-    min_raise = jnp.where(state.max_bet == 0, state.big_blind, state.max_bet * 2)
-    raise_amount = min_raise - state.bets[current_player]
+    min_raise = jnp.where(state.max_bet == 0, state.big_blind, jnp.int32(state.max_bet * 2))
+    raise_amount = jnp.int32(min_raise - state.bets[current_player])
     actual_raise = jnp.minimum(raise_amount, state.stacks[current_player])
     
     # Determine final amounts based on action
-    chips_to_add = jnp.where(is_call, actual_call, jnp.where(is_raise, actual_raise, 0))
+    chips_to_add = jnp.where(is_call, actual_call, jnp.where(is_raise, actual_raise, jnp.int32(0)))
     
-    # Update state arrays
+    # Update state arrays (ensure int32 types)
     new_folded = state.folded.at[current_player].set(state.folded[current_player] | is_fold)
     new_bets = state.bets.at[current_player].add(chips_to_add)
     new_stacks = state.stacks.at[current_player].subtract(chips_to_add)
-    new_pot = state.pot + chips_to_add
+    new_pot = jnp.int32(state.pot + chips_to_add)
     new_max_bet = jnp.where(is_raise, jnp.maximum(state.max_bet, new_bets[current_player]), state.max_bet)
     new_all_in = state.all_in.at[current_player].set(new_stacks[current_player] == 0)
-    new_last_raiser = jnp.where(is_raise, current_player, state.last_raiser)
+    new_last_raiser = jnp.where(is_raise, jnp.int32(current_player), state.last_raiser)
     
     return state.replace(
         folded=new_folded,
@@ -278,7 +280,7 @@ def _is_betting_round_over(state: State) -> bool:
 
 def _advance_round(state: State) -> State:
     """Advance to the next betting round."""
-    new_round = state.round + 1
+    new_round = jnp.int32(state.round + 1)
     
     # Reset betting for new round
     bets = jnp.zeros(MAX_PLAYERS, dtype=jnp.int32)
@@ -302,7 +304,7 @@ def _advance_round(state: State) -> State:
 def _next_player(state: State) -> State:
     """Move to the next player."""
     next_player = _get_next_active_player(state)
-    num_actions_this_round = state.num_actions_this_round + 1
+    num_actions_this_round = jnp.int32(state.num_actions_this_round + 1)
     
     return state.replace(
         current_player=next_player,
@@ -331,7 +333,7 @@ def _get_next_active_player(state: State) -> int:
     priorities = jnp.where(active_mask, priorities, -1)
     
     # Find player with highest priority (closest active player after current)
-    next_player = jnp.argmax(priorities)
+    next_player = jnp.int32(jnp.argmax(priorities))
     
     return next_player
 
@@ -340,7 +342,7 @@ def _get_first_player_for_round(state: State, round: int) -> int:
     """Get the first player to act in a given round."""
     # In post-flop rounds, small blind acts first
     # Preflop: player after big blind acts first
-    start_pos = jnp.where(round > 0, 0, 2 % state.num_players)
+    start_pos = jnp.where(round > 0, jnp.int32(0), jnp.int32(2 % state.num_players))
     return _get_next_active_player_from(state, start_pos)
 
 
@@ -358,7 +360,7 @@ def _get_next_active_player_from(state: State, start_pos: int) -> int:
     priorities = jnp.where(active_mask, priorities, -1)
     
     # Find player with highest priority (closest active player from start_pos)
-    next_player = jnp.argmax(priorities)
+    next_player = jnp.int32(jnp.argmax(priorities))
     
     return next_player
 
@@ -397,7 +399,7 @@ def _calculate_rewards(state: State) -> Array:
     is_equal_split = (~is_single_winner) & (~reached_showdown)
     
     # Single winner case: winner gets all the pot
-    single_winner_idx = jnp.argmax(active_mask)
+    single_winner_idx = jnp.int32(jnp.argmax(active_mask))
     single_winner_rewards = jnp.zeros(rewards_shape, dtype=jnp.float32).at[single_winner_idx].set(state.pot)
     
     # Showdown case: evaluate hands and award based on strength
@@ -405,7 +407,7 @@ def _calculate_rewards(state: State) -> Array:
         in_range = p < state.num_players
         return jnp.where(
             active_mask[p] & in_range,
-            _evaluate_hand(state.hole_cards[p], state.board_cards, state.round),
+            _evaluate_hand(state.hole_cardsets[p], state.board_cardset, state.round),
             jnp.int32(-1)  # Inactive players get -1
         )
     
@@ -413,12 +415,12 @@ def _calculate_rewards(state: State) -> Array:
     best_strength = jnp.max(jnp.where(active_mask, hand_strengths, -1))
     showdown_winners_mask = (hand_strengths == best_strength) & active_mask
     showdown_num_winners = jnp.sum(showdown_winners_mask)
-    showdown_pot_share = state.pot // jnp.maximum(showdown_num_winners, 1)
+    showdown_pot_share = jnp.int32(state.pot // jnp.maximum(showdown_num_winners, 1))
     showdown_rewards = jnp.where(showdown_winners_mask, showdown_pot_share, 0.0).astype(jnp.float32)
     
     # Equal split case: split pot among all active players
     equal_num_winners = jnp.sum(active_mask)
-    equal_pot_share = state.pot // jnp.maximum(equal_num_winners, 1)
+    equal_pot_share = jnp.int32(state.pot // jnp.maximum(equal_num_winners, 1))
     equal_split_rewards = jnp.where(active_mask, equal_pot_share, 0.0).astype(jnp.float32)
     
     # Select final rewards based on case
@@ -431,7 +433,7 @@ def _calculate_rewards(state: State) -> Array:
     return final_rewards
 
 
-def _evaluate_hand(hole_cards: Array, board_cards: Array, round: int) -> int:
+def _evaluate_hand(hole_cardset: jnp.uint64, board_cardset: jnp.uint64, round: int) -> int:
     """Evaluate hand strength using proper poker hand evaluation."""
     
     # Number of board cards visible in each round: preflop=0, flop=3, turn=4, river=5
@@ -440,16 +442,27 @@ def _evaluate_hand(hole_cards: Array, board_cards: Array, round: int) -> int:
     # Get number of visible board cards for this round
     num_visible = jnp.where(round >= 4, 5, num_board_cards[round])
     
-    # Create a mask for visible board cards
-    visible_mask = jnp.arange(5) < num_visible
-    visible_board = jnp.where(visible_mask, board_cards[:5], -1)
+    # For preflop (num_visible == 0), use hole cards only
+    # For postflop, combine hole cards with visible board cards using bitwise OR
+    def get_visible_board_cardset():
+        # Convert board to cards, mask by visibility, convert back to cardset
+        board_cards = cardset_to_cards(board_cardset)[:5]  # Take first 5 cards
+        visible_mask = jnp.arange(5) < num_visible
+        visible_board = jnp.where(visible_mask, board_cards, -1)
+        return cards_to_cardset(visible_board)
     
-    # Combine hole cards and visible board cards
-    all_cards = jnp.concatenate([hole_cards[:2], visible_board])
+    visible_board_cardset = jnp.where(num_visible == 0, jnp.uint64(0), get_visible_board_cardset())
+    
+    # Combine hole cards and visible board cards using bitwise OR
+    combined_cardset = hole_cardset | visible_board_cardset
+    
+    # Convert combined cardset to array for evaluator
+    all_cards = cardset_to_cards(combined_cardset)[:7]  # Take first 7 cards
     
     # Unified hand evaluation (Phase 4: Batch hand evaluation)
     # For preflop, use high card value; otherwise use full evaluation
-    preflop_value = jnp.max(hole_cards[:2])
+    hole_cards = cardset_to_cards(hole_cardset)[:2]  # Take first 2 cards
+    preflop_value = jnp.max(hole_cards)
     postflop_value = evaluate_hand(all_cards)
     
     return jnp.where(num_visible == 0, preflop_value, postflop_value)
@@ -458,63 +471,61 @@ def _evaluate_hand(hole_cards: Array, board_cards: Array, round: int) -> int:
 def _observe(state: State, player_id: int) -> Array:
     """Generate observation for a specific player."""
     # Observation includes:
-    # - Own hole cards (one-hot encoded)
-    # - Visible board cards (one-hot encoded) 
-    # - Pot size (normalized)
-    # - Own stack (normalized)
-    # - Current bets for all players (normalized)
-    # - Folded status for all players
-    # - Current round
+    # - Own hole cards (as cardset uint64)
+    # - Visible board cards (as cardset uint64) 
+    # - Pot size (int32)
+    # - Own stack (int32)
+    # - Current bets for all players (int32)
+    # - Folded status for all players (bool)
+    # - Current round (int32)
     
     obs_size = (
-        52 +  # Own hole cards (2 cards, one-hot)
-        52 +  # Board cards (up to 5, one-hot)
-        1 +   # Pot size (normalized)
-        1 +   # Own stack (normalized)
-        MAX_PLAYERS +  # Current bets (normalized)
+        1 +  # Own hole cards (cardset)
+        1 +  # Board cards (cardset) 
+        1 +  # Pot size
+        1 +  # Own stack
+        MAX_PLAYERS +  # Current bets
         MAX_PLAYERS +  # Folded status
-        4     # Round (one-hot)
+        1    # Current round
     )
     
-    # Vectorized observation encoding (Phase 3.2: Eliminate loops and conditionals)
-    obs = jnp.zeros(obs_size, dtype=jnp.float32)
+    # Own hole cards as cardset
+    hole_cardset = state.hole_cardsets[player_id]
     
-    # Precompute common values
-    total_chips = jnp.sum(state.stacks) + state.pot
-    safe_total_chips = jnp.maximum(total_chips, 1)
-    safe_pot = jnp.maximum(state.pot, 1)
-    
-    # Own hole cards - vectorized one-hot encoding
-    hole_cards = state.hole_cards[player_id, :2]
-    valid_holes = hole_cards >= 0
-    safe_holes = jnp.clip(hole_cards, 0, 51)
-    hole_indices = jnp.where(valid_holes, safe_holes, 52)  # Use out-of-bounds for invalid
-    obs = obs.at[hole_indices].add(valid_holes.astype(jnp.float32))
-    
-    # Visible board cards - vectorized
+    # Visible board cards as cardset - use bitwise operations to mask invisible cards
     num_board_cards = jnp.array([0, 3, 4, 5], dtype=jnp.int32)
     num_visible = jnp.where(state.round >= 4, 5, num_board_cards[state.round])
-    board_cards = state.board_cards[:5]
-    visible_mask = jnp.arange(5) < num_visible
-    valid_board = (board_cards >= 0) & visible_mask
-    safe_board = jnp.clip(board_cards, 0, 51)
-    board_indices = jnp.where(valid_board, safe_board + 52, obs_size)  # Offset by 52, use out-of-bounds for invalid
-    obs = obs.at[board_indices].add(valid_board.astype(jnp.float32))
     
-    # Build observation array in segments
-    segments = [
-        # Pot and stack (normalized)
-        jnp.array([state.pot / safe_total_chips, state.stacks[player_id] / safe_total_chips]),
-        # Current bets (normalized)
-        state.bets[:MAX_PLAYERS] / safe_pot,
-        # Folded status
-        state.folded[:MAX_PLAYERS].astype(jnp.float32),
-        # Current round (one-hot)
-        jnp.eye(4)[jnp.clip(state.round, 0, 3)] * (state.round < 4)
-    ]
+    # Create mask for invisible cards by getting the future cards and creating their cardset
+    def get_visible_board_cardset():
+        # Get all board cards in original dealing order
+        board_cards = cardset_to_cards(state.board_cardset)[:5]
+        
+        # Create mask for invisible cards (those that come after num_visible)
+        invisible_mask = jnp.arange(5) >= num_visible
+        invisible_cards = jnp.where(invisible_mask, board_cards, -1)
+        
+        # Convert invisible cards to cardset and use bitwise AND with NOT to remove them
+        invisible_cardset = cards_to_cardset(invisible_cards)
+        visible_board_cardset = state.board_cardset & (~invisible_cardset)
+        
+        return visible_board_cardset
     
-    # Concatenate all segments efficiently
-    numeric_obs = jnp.concatenate(segments)
-    obs = obs.at[104:].set(numeric_obs)  # Start after the 2x52 card sections
+    visible_board_cardset = jnp.where(num_visible == 0, jnp.uint64(0), get_visible_board_cardset())
+    
+    # Build observation array with appropriate types
+    # Format: [hole_cardset, board_cardset, pot, stack, bets[10], folded[10], round]
+    obs = jnp.concatenate([
+        # Cardsets (convert to int64 for concatenation)
+        jnp.array([hole_cardset.astype(jnp.int64), visible_board_cardset.astype(jnp.int64)]),
+        # Game state (int32)
+        jnp.array([state.pot, state.stacks[player_id]], dtype=jnp.int32),
+        # Current bets (int32)
+        state.bets[:MAX_PLAYERS],
+        # Folded status (convert bool to int32)
+        state.folded[:MAX_PLAYERS].astype(jnp.int32),
+        # Current round (int32)
+        jnp.array([state.round], dtype=jnp.int32)
+    ])
     
     return obs
