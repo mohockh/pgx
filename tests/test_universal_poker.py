@@ -167,13 +167,15 @@ class TestUniversalPoker:
             # New format uses mixed int64/int32 types, so we check the overall type
             assert obs.dtype in [jnp.int64, jnp.int32]  # Concatenation promotes to consistent type
             
-            # Check new observation size: [hole_cardset, board_cardset, pot, stack, bets[10], folded[10], round]
-            expected_size = 1 + 1 + 1 + 1 + 10 + 10 + 1  # cardsets + game state
+            # Check new observation size: [hole_cardset[2], board_cardset[2], pot, stack, bets[10], folded[10], round]
+            expected_size = 2 + 2 + 1 + 1 + 10 + 10 + 1  # cardsets uint32[2] + game state
             assert len(obs) == expected_size
             
-            # Verify cardset components are present (first two elements)
-            assert obs[0] >= 0  # hole cardset (uint64 cast to int64)
-            assert obs[1] >= 0  # board cardset (could be 0 in preflop)
+            # Verify cardset components are present (first four elements)
+            assert obs[0] >= 0  # hole cardset low uint32
+            assert obs[1] >= 0  # hole cardset high uint32
+            assert obs[2] >= 0  # board cardset low uint32 (could be 0 in preflop)
+            assert obs[3] >= 0  # board cardset high uint32 (could be 0 in preflop)
             
     def test_rewards_on_termination(self):
         """Test reward calculation when game terminates."""
@@ -261,7 +263,7 @@ class TestUniversalPoker:
         
         # States should be identical
         assert jnp.array_equal(state1.hole_cardsets, state2.hole_cardsets)
-        assert state1.board_cardset == state2.board_cardset
+        assert jnp.array_equal(state1.board_cardset, state2.board_cardset)
         assert state1.pot == state2.pot
         
     def test_state_consistency(self):

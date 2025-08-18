@@ -5,7 +5,7 @@ import pgx.core as core
 from pgx._src.struct import dataclass
 from pgx._src.types import Array, PRNGKey
 from .poker_eval.jax_evaluator_new import evaluate_hand
-from .poker_eval.cardset import cards_to_cardset, cardset_to_cards, add_card_to_cardset
+from .poker_eval.cardset import cards_to_cardset, cardset_to_cards, add_card_to_cardset, create_empty_cardset, cardset_or, cardset_and, cardset_not
 
 FALSE = jnp.bool_(False)
 TRUE = jnp.bool_(True)
@@ -56,8 +56,8 @@ class State(core.State):
     all_in: Array = jnp.zeros(MAX_PLAYERS, dtype=jnp.bool_)
     
     # Cards (using cardset representation for memory efficiency)
-    hole_cardsets: Array = jnp.zeros(MAX_PLAYERS, dtype=jnp.uint64)  # Each player's hole cards as cardset
-    board_cardset: Array = jnp.uint64(0)  # Board cards as single cardset
+    hole_cardsets: Array = jnp.zeros((MAX_PLAYERS, 2), dtype=jnp.uint32)  # Each player's hole cards as cardset uint32[2]
+    board_cardset: Array = jnp.zeros(2, dtype=jnp.uint32)  # Board cards as cardset uint32[2]
     
     # Betting info
     first_player: Array = jnp.array([1, 0, 0, 0], dtype=jnp.int32)  # first to act each round
@@ -129,7 +129,7 @@ def _init(rng: PRNGKey, num_players: int, stack_size: int, small_blind: int, big
     rng, subkey = jax.random.split(rng)
     deck = jax.random.permutation(subkey, jnp.arange(52))
     
-    hole_cardsets = jnp.zeros(MAX_PLAYERS, dtype=jnp.uint64)
+    hole_cardsets = jnp.zeros((MAX_PLAYERS, 2), dtype=jnp.uint32)
     card_idx = 0
     
     # Deal 2 hole cards to each player
@@ -433,7 +433,7 @@ def _calculate_rewards(state: State) -> Array:
     return final_rewards
 
 
-def _evaluate_hand(hole_cardset: jnp.uint64, board_cardset: jnp.uint64, round: int) -> int:
+def _evaluate_hand(hole_cardset: jnp.ndarray, board_cardset: jnp.ndarray, round: int) -> int:
     """Evaluate hand strength using proper poker hand evaluation."""
     
     # Number of board cards visible in each round: preflop=0, flop=3, turn=4, river=5
@@ -451,10 +451,10 @@ def _evaluate_hand(hole_cardset: jnp.uint64, board_cardset: jnp.uint64, round: i
         visible_board = jnp.where(visible_mask, board_cards, -1)
         return cards_to_cardset(visible_board)
     
-    visible_board_cardset = jnp.where(num_visible == 0, jnp.uint64(0), get_visible_board_cardset())
+    visible_board_cardset = jnp.where(num_visible == 0, create_empty_cardset(), get_visible_board_cardset())
     
     # Combine hole cards and visible board cards using bitwise OR
-    combined_cardset = hole_cardset | visible_board_cardset
+    combined_cardset = cardset_or(hole_cardset, visible_board_cardset)
     
     # Convert combined cardset to array for evaluator
     all_cards = cardset_to_cards(combined_cardset)[:7]  # Take first 7 cards
@@ -471,8 +471,8 @@ def _evaluate_hand(hole_cardset: jnp.uint64, board_cardset: jnp.uint64, round: i
 def _observe(state: State, player_id: int) -> Array:
     """Generate observation for a specific player."""
     # Observation includes:
-    # - Own hole cards (as cardset uint64)
-    # - Visible board cards (as cardset uint64) 
+    # - Own hole cards (as cardset uint32[2])
+    # - Visible board cards (as cardset uint32[2]) 
     # - Pot size (int32)
     # - Own stack (int32)
     # - Current bets for all players (int32)
@@ -480,8 +480,8 @@ def _observe(state: State, player_id: int) -> Array:
     # - Current round (int32)
     
     obs_size = (
-        1 +  # Own hole cards (cardset)
-        1 +  # Board cards (cardset) 
+        2 +  # Own hole cards (cardset uint32[2])
+        2 +  # Board cards (cardset uint32[2]) 
         1 +  # Pot size
         1 +  # Own stack
         MAX_PLAYERS +  # Current bets
@@ -507,17 +507,18 @@ def _observe(state: State, player_id: int) -> Array:
         
         # Convert invisible cards to cardset and use bitwise AND with NOT to remove them
         invisible_cardset = cards_to_cardset(invisible_cards)
-        visible_board_cardset = state.board_cardset & (~invisible_cardset)
+        visible_board_cardset = cardset_and(state.board_cardset, cardset_not(invisible_cardset))
         
         return visible_board_cardset
     
-    visible_board_cardset = jnp.where(num_visible == 0, jnp.uint64(0), get_visible_board_cardset())
+    visible_board_cardset = jnp.where(num_visible == 0, create_empty_cardset(), get_visible_board_cardset())
     
     # Build observation array with appropriate types
-    # Format: [hole_cardset, board_cardset, pot, stack, bets[10], folded[10], round]
+    # Format: [hole_cardset[2], board_cardset[2], pot, stack, bets[10], folded[10], round]
     obs = jnp.concatenate([
-        # Cardsets (convert to int64 for concatenation)
-        jnp.array([hole_cardset.astype(jnp.int64), visible_board_cardset.astype(jnp.int64)]),
+        # Cardsets (flatten uint32[2] arrays for concatenation)
+        hole_cardset.astype(jnp.int32),
+        visible_board_cardset.astype(jnp.int32),
         # Game state (int32)
         jnp.array([state.pot, state.stacks[player_id]], dtype=jnp.int32),
         # Current bets (int32)

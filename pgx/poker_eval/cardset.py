@@ -3,11 +3,18 @@ Card representation and conversion utilities for poker hand evaluation.
 
 Provides functions to convert between different card representations and
 work with the ACPC cardset format for fast evaluation.
+
+Now uses uint32[2] arrays for memory efficiency while maintaining full compatibility.
 """
 
 import jax
 import jax.numpy as jnp
 from typing import Union, List, Tuple
+from .cardset_ops import (
+    create_empty_cardset_u32, create_cardset_from_value_u32, cardset_or_u32,
+    cardset_and_u32, cardset_not_u32, set_bit_u32, get_bit_u32, 
+    cardset_to_uint64, or_reduce_u32
+)
 
 # Maximum number of cards that can be extracted from a cardset
 MAX_CARDS_IN_CARDSET = 10
@@ -38,7 +45,7 @@ def id_to_card(card_id: int) -> Tuple[int, int]:
     return card_id // 13, card_id % 13
 
 @jax.jit
-def cards_to_cardset(cards: jnp.ndarray) -> jnp.uint64:
+def cards_to_cardset(cards: jnp.ndarray) -> jnp.ndarray:
     """
     Convert array of card IDs to ACPC cardset representation using vectorized operations.
     
@@ -46,11 +53,11 @@ def cards_to_cardset(cards: jnp.ndarray) -> jnp.uint64:
         cards: Array of card IDs
         
     Returns:
-        64-bit cardset integer
+        uint32[2] cardset array
     """
     # Filter out invalid cards (-1)
     valid_mask = cards >= 0
-    valid_cards = jnp.where(valid_mask, cards, 0).astype(jnp.uint64)
+    valid_cards = jnp.where(valid_mask, cards, 0).astype(jnp.uint32)
     
     # Convert to suits and ranks (vectorized)
     suits = valid_cards // 13
@@ -59,21 +66,30 @@ def cards_to_cardset(cards: jnp.ndarray) -> jnp.uint64:
     # Calculate bit positions: (suit << 4) + rank
     bit_positions = (suits << 4) + ranks
     
-    # Create bit masks for each card
-    bit_masks = jnp.where(valid_mask, jnp.uint64(1) << bit_positions, jnp.uint64(0))
+    # Create bit masks for each card using uint32[2] operations
+    empty_cardset = create_empty_cardset_u32()
     
-    # OR all bit masks together to create final cardset
-    cardset = jnp.bitwise_or.reduce(bit_masks)
+    def add_card_if_valid(cardset, i):
+        return jnp.where(
+            valid_mask[i],
+            set_bit_u32(cardset, bit_positions[i]),
+            cardset
+        )
+    
+    # Build cardset by setting bits for valid cards
+    cardset = empty_cardset
+    for i in range(cards.shape[0]):
+        cardset = add_card_if_valid(cardset, i)
     
     return cardset
 
 @jax.jit
-def extract_suit_ranks(cardset: int) -> jnp.ndarray:
+def extract_suit_ranks(cardset: jnp.ndarray) -> jnp.ndarray:
     """
     Extract rank patterns for each suit from cardset.
     
     Args:
-        cardset: 64-bit cardset integer
+        cardset: uint32[2] cardset array
         
     Returns:
         Array of 4 integers, each with 13 bits representing ranks in that suit
@@ -82,12 +98,12 @@ def extract_suit_ranks(cardset: int) -> jnp.ndarray:
     
     # Extract ranks for each suit using JAX operations
     for suit in range(4):
-        ranks = 0
+        ranks = jnp.uint16(0)
         for rank in range(13):
             bit_pos = (suit << 4) + rank
-            # Use JAX operations instead of Python if
-            bit_set = (cardset >> bit_pos) & 1
-            ranks |= bit_set << rank
+            # Use uint32[2] operations
+            bit_set = get_bit_u32(cardset, bit_pos)
+            ranks |= jnp.uint16(bit_set << rank)
         suit_ranks = suit_ranks.at[suit].set(ranks)
     
     return suit_ranks
@@ -130,12 +146,12 @@ def cards_to_suit_patterns(cards: jnp.ndarray) -> jnp.ndarray:
     return suit_patterns
 
 @jax.jit
-def count_suit_cards(cardset: int) -> jnp.ndarray:
+def count_suit_cards(cardset: jnp.ndarray) -> jnp.ndarray:
     """
     Count number of cards in each suit.
     
     Args:
-        cardset: 64-bit cardset integer
+        cardset: uint32[2] cardset array
         
     Returns:
         Array of 4 integers with card counts per suit
@@ -143,23 +159,23 @@ def count_suit_cards(cardset: int) -> jnp.ndarray:
     suit_counts = jnp.zeros(4, dtype=jnp.int32)
     
     for suit in range(4):
-        count = 0
+        count = jnp.int32(0)
         for rank in range(13):
             bit_pos = (suit << 4) + rank
-            # Use JAX operations instead of Python if
-            bit_set = (cardset >> bit_pos) & 1
-            count += bit_set
+            # Use uint32[2] operations
+            bit_set = get_bit_u32(cardset, bit_pos)
+            count += jnp.int32(bit_set)
         suit_counts = suit_counts.at[suit].set(count)
     
     return suit_counts
 
 @jax.jit
-def get_rank_counts(cardset: int) -> jnp.ndarray:
+def get_rank_counts(cardset: jnp.ndarray) -> jnp.ndarray:
     """
     Count occurrences of each rank across all suits.
     
     Args:
-        cardset: 64-bit cardset integer
+        cardset: uint32[2] cardset array
         
     Returns:
         Array of 13 integers with count of each rank
@@ -167,12 +183,12 @@ def get_rank_counts(cardset: int) -> jnp.ndarray:
     rank_counts = jnp.zeros(13, dtype=jnp.int32)
     
     for rank in range(13):
-        count = 0
+        count = jnp.int32(0)
         for suit in range(4):
             bit_pos = (suit << 4) + rank
-            # Use JAX operations instead of Python if
-            bit_set = (cardset >> bit_pos) & 1
-            count += bit_set
+            # Use uint32[2] operations
+            bit_set = get_bit_u32(cardset, bit_pos)
+            count += jnp.int32(bit_set)
         rank_counts = rank_counts.at[rank].set(count)
     
     return rank_counts
@@ -290,27 +306,27 @@ def format_hand(cards: List[int]) -> str:
     return " ".join(format_card(card) for card in cards)
 
 @jax.jit
-def cardset_to_cards(cardset: jnp.uint64) -> jnp.ndarray:
+def cardset_to_cards(cardset: jnp.ndarray) -> jnp.ndarray:
     """
     Convert cardset back to array of card IDs.
     
     Args:
-        cardset: 64-bit cardset integer
+        cardset: uint32[2] cardset array
         
     Returns:
         Array of card IDs, padded with -1 for empty slots
         Always returns MAX_CARDS_IN_CARDSET cards
     """
     cards = jnp.full(MAX_CARDS_IN_CARDSET, -1, dtype=jnp.int32)
-    card_count = 0
+    card_count = jnp.int32(0)
     
     # Check each possible card (0-51)
     for card_id in range(52):
         bit_pos = (card_id // 13) * 16 + (card_id % 13)  # ACPC bit position
-        has_card = (cardset >> bit_pos) & 1
+        has_card = get_bit_u32(cardset, bit_pos)
         
         # If card is present and we have space, add it
-        new_count = card_count + has_card
+        new_count = card_count + jnp.int32(has_card)
         cards = jnp.where(
             (has_card > 0) & (card_count < MAX_CARDS_IN_CARDSET),
             cards.at[card_count].set(card_id),
@@ -321,12 +337,12 @@ def cardset_to_cards(cardset: jnp.uint64) -> jnp.ndarray:
     return cards
 
 @jax.jit
-def add_card_to_cardset(cardset: jnp.uint64, card_id: int) -> jnp.uint64:
+def add_card_to_cardset(cardset: jnp.ndarray, card_id: int) -> jnp.ndarray:
     """
     Add a single card to a cardset.
     
     Args:
-        cardset: Existing cardset
+        cardset: Existing uint32[2] cardset array
         card_id: Card ID to add (0-51)
         
     Returns:
@@ -337,4 +353,44 @@ def add_card_to_cardset(cardset: jnp.uint64, card_id: int) -> jnp.uint64:
     rank = card_id % 13
     bit_pos = (suit << 4) + rank
     
-    return cardset | jnp.uint64(1 << bit_pos)
+    return set_bit_u32(cardset, bit_pos)
+
+
+# ============================================================================
+# COMPATIBILITY AND CONVENIENCE FUNCTIONS
+# ============================================================================
+
+@jax.jit
+def create_empty_cardset() -> jnp.ndarray:
+    """Create an empty cardset (uint32[2])."""
+    return create_empty_cardset_u32()
+
+
+@jax.jit
+def cardset_or(a: jnp.ndarray, b: jnp.ndarray) -> jnp.ndarray:
+    """Bitwise OR of two cardsets (uint32[2])."""
+    return cardset_or_u32(a, b)
+
+
+@jax.jit
+def cardset_and(a: jnp.ndarray, b: jnp.ndarray) -> jnp.ndarray:
+    """Bitwise AND of two cardsets (uint32[2])."""
+    return cardset_and_u32(a, b)
+
+
+@jax.jit
+def cardset_not(a: jnp.ndarray) -> jnp.ndarray:
+    """Bitwise NOT of cardset (uint32[2])."""
+    return cardset_not_u32(a)
+
+
+@jax.jit
+def cardset_to_int(cardset: jnp.ndarray) -> jnp.uint64:
+    """Convert uint32[2] cardset to uint64 for debugging/comparison."""
+    return cardset_to_uint64(cardset)
+
+
+@jax.jit
+def cardset_from_int(value: jnp.uint64) -> jnp.ndarray:
+    """Convert uint64 to uint32[2] cardset."""
+    return create_cardset_from_value_u32(value)
