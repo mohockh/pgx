@@ -59,6 +59,9 @@ class State(core.State):
     hole_cardsets: Array = jnp.zeros((MAX_PLAYERS, 2), dtype=jnp.uint32)  # Each player's hole cards as cardset uint32[2]
     board_cardset: Array = jnp.zeros(2, dtype=jnp.uint32)  # Board cards as cardset uint32[2]
     
+    # Pre-computed hand evaluations for final showdown
+    hand_final_scores: Array = jnp.zeros(MAX_PLAYERS, dtype=jnp.int32)  # Final hand strength for each player
+    
     # Betting info
     first_player: Array = jnp.array([1, 0, 0, 0], dtype=jnp.int32)  # first to act each round
     small_blind: Array = jnp.int32(1)
@@ -143,6 +146,16 @@ def _init(rng: PRNGKey, num_players: int, stack_size: int, small_blind: int, big
     board_cardset = cards_to_cardset(board_cards)
     card_idx += 5
     
+    # Pre-compute final hand evaluations for all players (vectorized)
+    # Tile board_cardset to match hole_cardsets shape: (MAX_PLAYERS, 2)
+    board_cardsets_tiled = jnp.tile(board_cardset[None, :], (MAX_PLAYERS, 1))
+    
+    # Vectorized OR operation: combine all hole cards with board
+    combined_cardsets = cardset_or(hole_cardsets, board_cardsets_tiled)
+    
+    # Vectorized hand evaluation over all combined cardsets
+    hand_final_scores = jax.vmap(evaluate_hand)(combined_cardsets)
+    
     # Determine first player to act (after big blind in preflop)
     current_player = jnp.int32((2 % num_players) if num_players > 2 else 0)
     
@@ -154,6 +167,7 @@ def _init(rng: PRNGKey, num_players: int, stack_size: int, small_blind: int, big
         max_bet=max_bet,
         hole_cardsets=hole_cardsets,
         board_cardset=board_cardset,
+        hand_final_scores=hand_final_scores,
         current_player=jnp.int32(current_player),
         small_blind=jnp.int32(small_blind),
         big_blind=jnp.int32(big_blind),
@@ -402,18 +416,11 @@ def _calculate_rewards(state: State) -> Array:
     single_winner_idx = jnp.int32(jnp.argmax(active_mask))
     single_winner_rewards = jnp.zeros(rewards_shape, dtype=jnp.float32).at[single_winner_idx].set(state.pot)
     
-    # Showdown case: evaluate hands and award based on strength
-    def eval_player_hand(p):
-        in_range = p < state.num_players
-        return jnp.where(
-            active_mask[p] & in_range,
-            _evaluate_hand(state.hole_cardsets[p], state.board_cardset, state.round),
-            jnp.int32(-1)  # Inactive players get -1
-        )
-    
-    hand_strengths = jax.vmap(eval_player_hand)(jnp.arange(rewards_shape))
-    best_strength = jnp.max(jnp.where(active_mask, hand_strengths, -1))
-    showdown_winners_mask = (hand_strengths == best_strength) & active_mask
+    # Showdown case: use pre-computed hand evaluations
+    # Mask final scores by active players only
+    masked_scores = jnp.where(active_mask, state.hand_final_scores[:rewards_shape], -1)
+    best_strength = jnp.max(masked_scores)
+    showdown_winners_mask = (masked_scores == best_strength) & active_mask
     showdown_num_winners = jnp.sum(showdown_winners_mask)
     showdown_pot_share = jnp.int32(state.pot // jnp.maximum(showdown_num_winners, 1))
     showdown_rewards = jnp.where(showdown_winners_mask, showdown_pot_share, 0.0).astype(jnp.float32)
@@ -433,36 +440,6 @@ def _calculate_rewards(state: State) -> Array:
     return final_rewards
 
 
-def _evaluate_hand(hole_cardset: jnp.ndarray, board_cardset: jnp.ndarray, round: int) -> int:
-    """Evaluate hand strength using proper poker hand evaluation."""
-    
-    # Number of board cards visible in each round: preflop=0, flop=3, turn=4, river=5
-    num_board_cards = jnp.array([0, 3, 4, 5], dtype=jnp.int32)  # Cumulative counts
-    
-    # Get number of visible board cards for this round
-    num_visible = jnp.where(round >= 4, 5, num_board_cards[round])
-    
-    # For preflop (num_visible == 0), use hole cards only
-    # For postflop, combine hole cards with visible board cards using bitwise OR
-    def get_visible_board_cardset():
-        # Convert board to cards, mask by visibility, convert back to cardset
-        board_cards = cardset_to_cards(board_cardset)[:5]  # Take first 5 cards
-        visible_mask = jnp.arange(5) < num_visible
-        visible_board = jnp.where(visible_mask, board_cards, -1)
-        return cards_to_cardset(visible_board)
-    
-    visible_board_cardset = jnp.where(num_visible == 0, create_empty_cardset(), get_visible_board_cardset())
-    
-    # Combine hole cards and visible board cards using bitwise OR
-    combined_cardset = cardset_or(hole_cardset, visible_board_cardset)
-    
-    # Optimized hand evaluation: work directly with cardsets
-    # For preflop, use high card value; otherwise use full evaluation
-    hole_cards = cardset_to_cards(hole_cardset)[:2]  # Take first 2 cards for preflop only
-    preflop_value = jnp.max(hole_cards)
-    postflop_value = evaluate_hand(combined_cardset)  # Direct cardset evaluation
-    
-    return jnp.where(num_visible == 0, preflop_value, postflop_value)
 
 
 def _observe(state: State, player_id: int) -> Array:
