@@ -8,7 +8,6 @@ work with the ACPC cardset format for fast evaluation.
 import jax
 import jax.numpy as jnp
 from typing import Union, List, Tuple
-from .tables import get_hand_class, HAND_CLASSES
 
 def card_to_id(suit: int, rank: int) -> int:
     """
@@ -74,7 +73,7 @@ def extract_suit_ranks(cardset: int) -> jnp.ndarray:
     Returns:
         Array of 4 integers, each with 13 bits representing ranks in that suit
     """
-    suit_ranks = jnp.zeros(4, dtype=jnp.int32)
+    suit_ranks = jnp.zeros(4, dtype=jnp.uint16)
     
     # Extract ranks for each suit using JAX operations
     for suit in range(4):
@@ -87,6 +86,40 @@ def extract_suit_ranks(cardset: int) -> jnp.ndarray:
         suit_ranks = suit_ranks.at[suit].set(ranks)
     
     return suit_ranks
+
+@jax.jit
+def cards_to_suit_patterns(cards: jnp.ndarray) -> jnp.ndarray:
+    """
+    Convert array of card IDs directly to C-style bySuit representation.
+    This matches the C Cardset.bySuit[4] format exactly.
+    
+    Args:
+        cards: Array of card IDs (0-51), padded with -1 for invalid cards
+        
+    Returns:
+        Array of shape (4,) representing bySuit[4] - 13-bit patterns for each suit
+    """
+    # Filter valid cards
+    valid_mask = cards >= 0
+    valid_cards = jnp.where(valid_mask, cards, 0)
+    
+    # Convert to suits and ranks
+    suits = valid_cards // 13
+    ranks = valid_cards % 13
+    
+    # Create 13-bit patterns for each suit
+    suit_patterns = jnp.zeros(4, dtype=jnp.uint16)
+    
+    # For each card, set the appropriate bit in the suit pattern
+    for i in range(cards.shape[0]):
+        is_valid = valid_mask[i]
+        suit = suits[i]
+        rank = ranks[i]
+        # Set bit at position 'rank' in suit pattern
+        bit_value = jnp.where(is_valid, 1 << rank, 0)
+        suit_patterns = suit_patterns.at[suit].add(bit_value)
+    
+    return suit_patterns
 
 @jax.jit
 def count_suit_cards(cardset: int) -> jnp.ndarray:
@@ -138,7 +171,7 @@ def get_rank_counts(cardset: int) -> jnp.ndarray:
 
 def hand_class(strength: int) -> int:
     """
-    Get hand class (0-8) from hand strength value.
+    Get hand class (0-8) from hand strength value using C ACPC thresholds.
     
     Args:
         strength: Hand strength value from evaluator
@@ -146,7 +179,29 @@ def hand_class(strength: int) -> int:
     Returns:
         Hand class: 0=high card, 1=pair, ..., 8=straight flush
     """
-    return get_hand_class(strength)
+    # Use ACPC hand class thresholds from constants.py
+    from .tables.constants import (HANDCLASS_SINGLE_CARD, HANDCLASS_PAIR, HANDCLASS_TWO_PAIR,
+                                   HANDCLASS_TRIPS, HANDCLASS_STRAIGHT, HANDCLASS_FLUSH,
+                                   HANDCLASS_FULL_HOUSE, HANDCLASS_QUADS, HANDCLASS_STRAIGHT_FLUSH)
+    
+    if strength >= HANDCLASS_STRAIGHT_FLUSH:
+        return 8  # Straight flush
+    elif strength >= HANDCLASS_QUADS:
+        return 7  # Four of a kind
+    elif strength >= HANDCLASS_FULL_HOUSE:
+        return 6  # Full house
+    elif strength >= HANDCLASS_FLUSH:
+        return 5  # Flush
+    elif strength >= HANDCLASS_STRAIGHT:
+        return 4  # Straight
+    elif strength >= HANDCLASS_TRIPS:
+        return 3  # Three of a kind
+    elif strength >= HANDCLASS_TWO_PAIR:
+        return 2  # Two pair
+    elif strength >= HANDCLASS_PAIR:
+        return 1  # One pair
+    else:
+        return 0  # High card
 
 def hand_description(strength: int) -> str:
     """
@@ -158,8 +213,19 @@ def hand_description(strength: int) -> str:
     Returns:
         String description of hand type
     """
-    class_id = get_hand_class(strength)
-    return HAND_CLASSES.get(class_id, "Unknown")
+    hand_classes = {
+        0: "High Card",
+        1: "Pair", 
+        2: "Two Pair",
+        3: "Three of a Kind",
+        4: "Straight",
+        5: "Flush", 
+        6: "Full House",
+        7: "Four of a Kind",
+        8: "Straight Flush"
+    }
+    class_id = hand_class(strength)
+    return hand_classes.get(class_id, "Unknown")
 
 def format_card(card_id: int) -> str:
     """

@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import sys
 import os
 
-from pgx.poker_eval.jax_evaluator import evaluate_hand_jax
+from pgx.poker_eval.jax_evaluator_new import evaluate_hand_jax
 from pgx.universal_poker import UniversalPoker
 
 

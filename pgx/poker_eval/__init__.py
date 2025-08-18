@@ -5,13 +5,11 @@ Based on the ACPC (Annual Computer Poker Competition) hand evaluation system
 for maximum speed and accuracy.
 """
 
-from .evaluator import evaluate_hand, batch_evaluate, hand_vs_hand
+from .jax_evaluator_new import evaluate_hand_jax as evaluate_hand
 from .cardset import card_to_id, cards_to_cardset, hand_class, hand_description
 
 __all__ = [
     'evaluate_hand',
-    'batch_evaluate', 
-    'hand_vs_hand',
     'card_to_id',
     'cards_to_cardset',
     'hand_class',
