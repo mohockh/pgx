@@ -90,7 +90,7 @@ def extract_suit_ranks(cardset: int) -> jnp.ndarray:
 @jax.jit
 def cards_to_suit_patterns(cards: jnp.ndarray) -> jnp.ndarray:
     """
-    Convert array of card IDs directly to C-style bySuit representation.
+    Fully vectorized conversion of card IDs to C-style bySuit representation.
     This matches the C Cardset.bySuit[4] format exactly.
     
     Args:
@@ -103,21 +103,24 @@ def cards_to_suit_patterns(cards: jnp.ndarray) -> jnp.ndarray:
     valid_mask = cards >= 0
     valid_cards = jnp.where(valid_mask, cards, 0)
     
-    # Convert to suits and ranks
+    # Convert to suits and ranks vectorized
     suits = valid_cards // 13
     ranks = valid_cards % 13
     
-    # Create 13-bit patterns for each suit
-    suit_patterns = jnp.zeros(4, dtype=jnp.uint16)
+    # Create bit patterns for each valid card: 2^rank, only for valid cards
+    bit_patterns = jnp.where(valid_mask, jnp.uint16(1) << ranks, jnp.uint16(0))
     
-    # For each card, set the appropriate bit in the suit pattern
-    for i in range(cards.shape[0]):
-        is_valid = valid_mask[i]
-        suit = suits[i]
-        rank = ranks[i]
-        # Set bit at position 'rank' in suit pattern
-        bit_value = jnp.where(is_valid, 1 << rank, 0)
-        suit_patterns = suit_patterns.at[suit].add(bit_value)
+    # Fully vectorized approach using broadcasting
+    # Create a 4x7 matrix where each row represents a suit and columns are card positions
+    suit_indicators = jnp.arange(4)[:, None] == suits[None, :]  # Shape: (4, num_cards)
+    valid_indicators = valid_mask[None, :] & suit_indicators     # Shape: (4, num_cards)
+    
+    # Sum bit patterns for each suit
+    suit_patterns = jnp.sum(
+        jnp.where(valid_indicators, bit_patterns[None, :], jnp.uint16(0)), 
+        axis=1, 
+        dtype=jnp.uint16
+    )
     
     return suit_patterns
 

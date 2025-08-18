@@ -118,7 +118,7 @@ if __name__ == "__main__":
     print("=" * 50)
     
     # Test hand evaluation performance
-    benchmark_evaluators(1000000, chunk_size=100000)
+    benchmark_evaluators(1000000, chunk_size=1000000)
     
     # Test with Universal Poker
     test_universal_poker_performance(1000)
