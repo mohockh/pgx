@@ -538,6 +538,45 @@ class TestComprehensiveTwoPair:
         hand2 = cards_from_string("Kd Kc As Ah Qh")
         assert evaluate_hand(hand1) == evaluate_hand(hand2)
     
+    def test_two_pair_aces_and_eights_vs_aces_and_fives(self):
+        # Two pair: Aces and 8s vs Aces and 5s - higher second pair should win
+        hand1 = cards_from_string("As Ah 8d 8c 9h")  # Aces and 8s
+        hand2 = cards_from_string("Ad Ac 5s 5h 9d")  # Aces and 5s  
+        strength1 = evaluate_hand(hand1)
+        strength2 = evaluate_hand(hand2)
+        print(f"Aces and 8s strength: {strength1}")
+        print(f"Aces and 5s strength: {strength2}")
+        assert strength1 > strength2, f"Aces and 8s ({strength1}) should beat Aces and 5s ({strength2})"
+        assert hand_class(strength1) == 2
+        assert hand_class(strength2) == 2
+    
+    def test_seven_card_two_pair_bug(self):
+        # Test the specific 7-card scenario from our side pot test that's failing
+        # P1: 8s, 8h, Ac, Ad, 5c, 5d, 9s should be two pair Aces and 8s, not full house
+        hand1 = cards_from_string("8s 8h Ac Ad 5c 5d 9s")  # Should be two pair Aces and 8s
+        strength1 = evaluate_hand(hand1)
+        class1 = hand_class(strength1)
+        print(f"7-card hand with 8s,8h,Ac,Ad,5c,5d,9s: strength={strength1}, class={class1}")
+        
+        # Compare with 5-card version
+        hand1_5card = cards_from_string("As Ah 8s 8h 9c")  # Pure two pair Aces and 8s
+        strength1_5card = evaluate_hand(hand1_5card)
+        class1_5card = hand_class(strength1_5card)
+        print(f"5-card Aces and 8s: strength={strength1_5card}, class={class1_5card}")
+        
+        # P3: 7c, 2d, Ac, Ad, 5c, 5d, 9s should be two pair Aces and 5s
+        hand3 = cards_from_string("7c 2d Ac Ad 5c 5d 9s")  # Should be two pair Aces and 5s
+        strength3 = evaluate_hand(hand3)
+        class3 = hand_class(strength3)
+        print(f"7-card hand with 7c,2d,Ac,Ad,5c,5d,9s: strength={strength3}, class={class3}")
+        
+        # The 7-card hands should be two pair, not full house
+        assert class1 == 2, f"7-card hand should be two pair (2), got {class1}"
+        assert class3 == 2, f"7-card hand should be two pair (2), got {class3}"
+        
+        # The first hand should be stronger (Aces and 8s vs Aces and 5s)  
+        assert strength1 > strength3, f"Aces and 8s ({strength1}) should beat Aces and 5s ({strength3})"
+    
     def test_two_pair_pocket_pairs_vs_board_pairs(self):
         hand = cards_from_string("As Ah Kd Kc Qh")
         assert hand_class(evaluate_hand(hand)) == 2

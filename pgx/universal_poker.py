@@ -408,50 +408,89 @@ def _get_legal_actions(state: State) -> Array:
 
 
 def _calculate_rewards(state: State) -> Array:
-    """Calculate final rewards for all players."""
-    # Use the same shape as the input rewards
-    rewards_shape = state.rewards.shape[0]
-    rewards = jnp.zeros(rewards_shape, dtype=jnp.float32)
-    
+    """Calculate final rewards for all players with proper side pot distribution."""
     # Get active players (not folded) - use pre-computed masks
-    # For rewards, we need players who are not folded (regardless of all-in status)
     active_mask = (~state.folded & state.player_mask)
     num_active = jnp.sum(active_mask)
     
-    # Vectorized reward calculation (Phase 2.2: Eliminate nested conditionals)
+    # Handle single winner case (early fold scenarios)
     is_single_winner = num_active == 1
     reached_showdown = state.round >= 4
     is_showdown = (~is_single_winner) & reached_showdown
-    is_equal_split = (~is_single_winner) & (~reached_showdown)
     
-    # Single winner case: winner gets all the pot
-    single_winner_idx = jnp.int32(jnp.argmax(active_mask))
-    single_winner_rewards = jnp.zeros(rewards_shape, dtype=jnp.float32).at[single_winner_idx].set(state.pot)
+    def single_winner_case():
+        single_winner_idx = jnp.int32(jnp.argmax(active_mask))
+        rewards = jnp.zeros(MAX_PLAYERS, dtype=jnp.float32)
+        return rewards.at[single_winner_idx].set(state.pot)
     
-    # Showdown case: use pre-computed hand evaluations
-    # Mask final scores by active players only
-    masked_scores = jnp.where(active_mask, state.hand_final_scores, -1)
-    best_strength = jnp.max(masked_scores)
-    showdown_winners_mask = (masked_scores == best_strength) & active_mask
-    showdown_num_winners = jnp.sum(showdown_winners_mask)
-    showdown_pot_share = jnp.int32(state.pot // jnp.maximum(showdown_num_winners, 1))
-    showdown_rewards_full = jnp.where(showdown_winners_mask, showdown_pot_share, 0.0).astype(jnp.float32)
-    showdown_rewards = showdown_rewards_full[:rewards_shape]
+    def side_pot_calculation():
+        # Use contributions (bets) and hand strengths for active players only - keep as uint32
+        contributions = jnp.where(active_mask, state.bets, jnp.uint32(0))
+        hand_strengths = jnp.where(active_mask, state.hand_final_scores, jnp.uint32(0))
+        
+        # --- 1. Identify Pot Layers ---
+        # Find unique contribution levels to define pot boundaries
+        # JAX requires concrete size for unique() - use large fill value to avoid duplicates
+        all_pot_levels = jnp.unique(jnp.concatenate([jnp.array([0], dtype=jnp.uint32), contributions]), size=MAX_PLAYERS+1, fill_value=jnp.uint32(999999))
+        # Only use levels that are not the fill value
+        valid_levels_mask = all_pot_levels < 999999
+        # Calculate increments only for consecutive valid levels  
+        level_increments = jnp.diff(all_pot_levels, prepend=jnp.uint32(0))[1:]
+        # Zero out increments for invalid transitions
+        level_increments = jnp.where(valid_levels_mask[1:] & valid_levels_mask[:-1], level_increments, jnp.uint32(0))
+        pot_levels = all_pot_levels
+        
+        # --- 2. Determine Player Eligibility for Each Pot Layer ---
+        # Create a 2D boolean mask (num_players x num_pot_layers)
+        # eligible_mask[i, j] is True if player `i` is eligible for pot layer `j`
+        eligible_mask = contributions[:, jnp.newaxis] >= pot_levels[jnp.newaxis, 1:]
+        
+        # --- 3. Calculate the Size of Each Pot Layer ---
+        # Count eligible players for each layer
+        num_eligible_players = eligible_mask.sum(axis=0).astype(jnp.uint32)
+        # Calculate the size of each pot layer
+        pot_layer_sizes = level_increments * num_eligible_players
+        
+        # --- 4. Find the Winner(s) of Each Pot Layer ---
+        # Mask out ineligible players' hand strengths by setting them to 0
+        masked_strengths = jnp.where(eligible_mask, hand_strengths[:, jnp.newaxis], jnp.uint32(0))
+        # Find the maximum hand strength for each pot layer
+        max_strength_per_pot = masked_strengths.max(axis=0)
+        # Identify all players with the winning hand strength for each pot (eligible winners only)
+        is_winner_mask = eligible_mask & (masked_strengths == max_strength_per_pot)
+        
+        # --- 5. Distribute Winnings ---
+        # Count winners for each pot to handle ties
+        num_winners_per_pot = is_winner_mask.sum(axis=0).astype(jnp.uint32)
+        # Avoid division by zero
+        safe_num_winners = jnp.where(num_winners_per_pot > 0, num_winners_per_pot, jnp.uint32(1))
+        # Calculate the payout per winner for each pot layer (integer division)
+        payout_per_winner = pot_layer_sizes // safe_num_winners
+        # Distribute the pot layer amounts to the winners
+        winnings_matrix = jnp.where(is_winner_mask, payout_per_winner[jnp.newaxis, :], jnp.uint32(0))
+        # Sum the winnings from all pot layers for each player
+        total_winnings = winnings_matrix.sum(axis=1)
+        
+        # Convert to float32 for final return
+        return total_winnings.astype(jnp.float32)
     
-    # Equal split case: split pot among all active players
-    equal_num_winners = jnp.sum(active_mask)
-    equal_pot_share = jnp.int32(state.pot // jnp.maximum(equal_num_winners, 1))
-    equal_split_rewards_full = jnp.where(active_mask, equal_pot_share, 0.0).astype(jnp.float32)
-    equal_split_rewards = equal_split_rewards_full[:rewards_shape]
+    def equal_split_case():
+        equal_pot_share = jnp.float32(state.pot) / jnp.maximum(num_active, 1)
+        return jnp.where(active_mask, equal_pot_share, 0.0)
     
-    # Select final rewards based on case
+    # Calculate final rewards based on game state
     final_rewards = jnp.where(
         is_single_winner,
-        single_winner_rewards,
-        jnp.where(is_showdown, showdown_rewards, equal_split_rewards)
+        single_winner_case(),
+        jnp.where(
+            is_showdown,
+            side_pot_calculation(),
+            equal_split_case()
+        )
     )
     
-    return final_rewards
+    # Return the appropriate slice for backward compatibility with existing reward array size
+    return final_rewards[:state.rewards.shape[0]]
 
 
 

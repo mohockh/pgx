@@ -412,6 +412,126 @@ class TestUniversalPoker:
         assert state.stacks[0] == 2  # Almost all-in from start
         assert state.stacks[1] == 1  # Almost all-in from start
 
+    def test_side_pot_distribution(self):
+        """Test complex side pot distribution with 4 players, different stacks, and specific hand rankings."""
+        from pgx.poker_eval.cardset import cards_to_cardset, add_card_to_cardset, create_empty_cardset
+        
+        # Custom initialization to control cards and stacks
+        # Player stacks: P0=10 (smallest, best hand), P1=20, P2=30, P3=50 (largest, worst hand)
+        stacks = [10, 20, 30, 50]
+        
+        # Create state manually to control card distribution
+        env = universal_poker.UniversalPoker(num_players=4, stack_size=50, small_blind=1, big_blind=2)
+        key = jax.random.PRNGKey(42)
+        
+        # Initialize basic state
+        state = env.init(key)
+        
+        # Override stacks
+        new_stacks = jnp.zeros(universal_poker.MAX_PLAYERS, dtype=jnp.int32)
+        new_stacks = new_stacks.at[:4].set(jnp.array(stacks))
+        state = state.replace(stacks=new_stacks)
+        
+        # Create specific hole cards for predetermined hand strengths
+        # P0 (stack=10): Pocket Aces for quads potential - As, Ah  
+        # P1 (stack=20): 8s, 8h for two pair potential
+        # P2 (stack=30): 8c, 8d for two pair potential (same strength as P1)
+        # P3 (stack=50): 7c, 2d for high card (worst hand)
+        
+        # Card IDs: As=51, Ah=38, 8s=45, 8h=32, 8c=6, 8d=19, 7c=5, 2d=13
+        hole_cards_list = [
+            [51, 38],  # P0: As, Ah
+            [45, 32],  # P1: 8s, 8h  
+            [6, 19],   # P2: 8c, 8d
+            [5, 13]    # P3: 7c, 2d
+        ]
+        
+        # Create board with specific cards to give P0 quads, P1&P2 two pair, P3 two pair
+        # Board: Ac, Ad, 5c, 5d, 9s - gives P0 quad aces, P1&P2 two pair (Aces and 8s), P3 two pair (Aces and 5s)
+        board_cards = [12, 25, 3, 16, 46]  # Ac=12, Ad=25, 5c=3, 5d=16, 9s=46
+        
+        # Convert to cardsets
+        new_hole_cardsets = jnp.zeros((universal_poker.MAX_PLAYERS, 2), dtype=jnp.uint32)
+        for i in range(4):
+            hole_cardset = cards_to_cardset(jnp.array(hole_cards_list[i]))
+            new_hole_cardsets = new_hole_cardsets.at[i].set(hole_cardset)
+        
+        board_cardset = cards_to_cardset(jnp.array(board_cards))
+        
+        # Pre-compute hand scores for these specific hands
+        from pgx.poker_eval.jax_evaluator_new import evaluate_hand
+        from pgx.poker_eval.cardset import cardset_or
+        
+        board_cardsets_tiled = jnp.tile(board_cardset[None, :], (universal_poker.MAX_PLAYERS, 1))
+        combined_cardsets = cardset_or(new_hole_cardsets, board_cardsets_tiled)
+        hand_final_scores = jax.vmap(evaluate_hand)(combined_cardsets)
+        
+        # Update state with controlled cards and scores
+        state = state.replace(
+            hole_cardsets=new_hole_cardsets,
+            board_cardset=board_cardset,
+            hand_final_scores=hand_final_scores,
+            round=4,  # Set to river (showdown)
+            terminated=True,  # Force termination for reward calculation
+            folded=jnp.zeros(universal_poker.MAX_PLAYERS, dtype=jnp.bool_)  # No one folded
+        )
+        
+        # Set up final pot scenario - all players all-in with different contribution amounts
+        # P0 contributed 10, P1 contributed 20, P2 contributed 30, P3 contributed 50
+        # This creates the side pot structure we want to test
+        
+        final_bets = jnp.array([10, 20, 30, 50] + [0] * (universal_poker.MAX_PLAYERS - 4))
+        total_pot = 10 + 20 + 30 + 50  # 110
+        
+        state = state.replace(
+            bets=final_bets,
+            pot=jnp.int32(total_pot),
+            rewards=jnp.zeros(4, dtype=jnp.float32)  # Expand rewards to 4 players for this test
+        )
+        
+        # Calculate rewards using the new side pot algorithm
+        rewards = universal_poker._calculate_rewards(state)
+        
+        # Expected side pot distribution with contributions [10, 20, 30, 50]:
+        # Pot levels: [0, 10, 20, 30, 50]  
+        # Layer 1 (0->10): 4 eligible players, P0 wins with quads = 10*4 = 40 to P0
+        # Layer 2 (10->20): 3 eligible players (P1,P2,P3), P1&P2 tie (both Aces and 8s) = 10*3/2 = 15 each to P1,P2  
+        # Layer 3 (20->30): 2 eligible players (P2,P3), P2 wins (Aces and 8s > Aces and 5s) = 10*2 = 20 to P2
+        # Layer 4 (30->50): 1 eligible player (P3), P3 wins = 20*1 = 20 to P3
+        #
+        # Expected final amounts:
+        # P0: 40 (wins main pot with quads)
+        # P1: 15 (ties for side pot 2 with P2)  
+        # P2: 35 (15 from side pot 2 tie + 20 from side pot 3)
+        # P3: 20 (wins final side pot 4 uncontested)
+        
+        print(f"Hand scores: {hand_final_scores[:4]}")
+        print(f"Contributions (bets): {final_bets[:4]}")  
+        print(f"Rewards: {rewards[:4]}")
+        print(f"Total distributed: {jnp.sum(rewards[:4])}")
+        
+        # Verify P0 gets main pot with best hand
+        assert rewards[0] == 40, f"P0 should win 40 (main pot), got {rewards[0]}"
+        
+        # Verify total rewards equal total pot
+        assert jnp.sum(rewards[:4]) == total_pot, f"Total rewards {jnp.sum(rewards[:4])} should equal pot {total_pot}"
+        
+        # Verify P0 has best hand (highest score)
+        assert hand_final_scores[0] > hand_final_scores[1], "P0 should have better hand than P1"
+        assert hand_final_scores[0] > hand_final_scores[2], "P0 should have better hand than P2" 
+        assert hand_final_scores[0] > hand_final_scores[3], "P0 should have better hand than P3"
+        
+        # Verify side pot distribution based on actual hand strengths
+        assert rewards[1] == 15, f"P1 should get 15 from tied side pot, got {rewards[1]}"
+        assert rewards[2] == 35, f"P2 should get 35 (15+20 from multiple pots), got {rewards[2]}"  
+        assert rewards[3] == 20, f"P3 should get 20 from uncontested final side pot, got {rewards[3]}"
+        
+        # Verify hand strengths match expected pattern
+        # P1 and P2 have same hand strength (Aces and 8s), P3 has weaker (Aces and 5s), P0 has quads
+        assert hand_final_scores[1] == hand_final_scores[2], "P1 and P2 should have same hand strength (Aces and 8s)"
+        assert hand_final_scores[1] > hand_final_scores[3], "P1 should have better hand than P3 (Aces and 8s > Aces and 5s)"
+        assert hand_final_scores[2] > hand_final_scores[3], "P2 should have better hand than P3 (Aces and 8s > Aces and 5s)"
+
 
 if __name__ == "__main__":
     # Run basic tests
@@ -473,6 +593,9 @@ if __name__ == "__main__":
         
         test_suite.test_lazy_evaluation_jax_compilation()
         print("✓ Lazy evaluation JAX compilation test passed")
+        
+        test_suite.test_side_pot_distribution()
+        print("✓ Side pot distribution test passed")
         
         print("\nAll tests passed! ✅")
         
