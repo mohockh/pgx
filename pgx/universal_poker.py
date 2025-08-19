@@ -135,23 +135,17 @@ def _init(rng: PRNGKey, num_players: int, stack_size: int, small_blind: int, big
     pot = jnp.int32(small_blind + big_blind)
     max_bet = jnp.int32(big_blind)
     
-    # Deal hole cards using cardset representation
+    # Deal hole cards using vectorized approach - deal to all MAX_PLAYERS positions
     rng, subkey = jax.random.split(rng)
     deck = jax.random.permutation(subkey, jnp.arange(52))
     
-    hole_cardsets = jnp.zeros((MAX_PLAYERS, 2), dtype=jnp.uint32)
-    card_idx = 0
+    # Deal 2 hole cards to each of MAX_PLAYERS positions (vectorized)
+    all_hole_cards = deck[:MAX_PLAYERS*2].reshape(MAX_PLAYERS, 2)
+    hole_cardsets = jax.vmap(cards_to_cardset)(all_hole_cards)
     
-    # Deal 2 hole cards to each player
-    for p in range(num_players):
-        player_cards = deck[card_idx:card_idx+2]
-        hole_cardsets = hole_cardsets.at[p].set(cards_to_cardset(player_cards))
-        card_idx += 2
-    
-    # Deal 5 board cards
-    board_cards = deck[card_idx:card_idx+5]
+    # Deal 5 board cards 
+    board_cards = deck[MAX_PLAYERS*2:MAX_PLAYERS*2+5]
     board_cardset = cards_to_cardset(board_cards)
-    card_idx += 5
     
     # Pre-compute final hand evaluations for all players (vectorized)
     # Tile board_cardset to match hole_cardsets shape: (MAX_PLAYERS, 2)
@@ -165,10 +159,10 @@ def _init(rng: PRNGKey, num_players: int, stack_size: int, small_blind: int, big
     
     # Pre-compute visible board cardsets for each round (optimization for observation)
     visible_board_cardsets = jnp.array([
-        cards_to_cardset(board_cards[:0]),
+        create_empty_cardset(),
         cards_to_cardset(board_cards[:3]),
         cards_to_cardset(board_cards[:4]),
-        cards_to_cardset(board_cards[:5]),
+	board_cardset
     ], dtype=jnp.uint32)
     
     # Initialize pre-computed masks for performance optimization
@@ -464,25 +458,6 @@ def _calculate_rewards(state: State) -> Array:
 
 def _observe(state: State, player_id: int) -> Array:
     """Generate observation for a specific player."""
-    # Observation includes:
-    # - Own hole cards (as cardset uint32[2])
-    # - Visible board cards (as cardset uint32[2]) 
-    # - Pot size (int32)
-    # - Own stack (int32)
-    # - Current bets for all players (int32)
-    # - Folded status for all players (bool)
-    # - Current round (int32)
-    
-    obs_size = (
-        2 +  # Own hole cards (cardset uint32[2])
-        2 +  # Board cards (cardset uint32[2]) 
-        1 +  # Pot size
-        1 +  # Own stack
-        MAX_PLAYERS +  # Current bets
-        MAX_PLAYERS +  # Folded status
-        1    # Current round
-    )
-    
     # Own hole cards as cardset
     hole_cardset = state.hole_cardsets[player_id]
     
