@@ -59,6 +59,9 @@ class State(core.State):
     hole_cardsets: Array = jnp.zeros((MAX_PLAYERS, 2), dtype=jnp.uint32)  # Each player's hole cards as cardset uint32[2]
     board_cardset: Array = jnp.zeros(2, dtype=jnp.uint32)  # Board cards as cardset uint32[2]
     
+    # Pre-computed visible board cardsets for each round (optimization for observation)
+    visible_board_cardsets: Array = jnp.zeros((4, 2), dtype=jnp.uint32)  # [round, cardset] for rounds 0-3
+    
     # Pre-computed hand evaluations for final showdown
     hand_final_scores: Array = jnp.zeros(MAX_PLAYERS, dtype=jnp.int32)  # Final hand strength for each player
     
@@ -156,6 +159,14 @@ def _init(rng: PRNGKey, num_players: int, stack_size: int, small_blind: int, big
     # Vectorized hand evaluation over all combined cardsets
     hand_final_scores = jax.vmap(evaluate_hand)(combined_cardsets)
     
+    # Pre-compute visible board cardsets for each round (optimization for observation)
+    visible_board_cardsets = jnp.array([
+        cards_to_cardset(board_cards[:0]),
+        cards_to_cardset(board_cards[:3]),
+        cards_to_cardset(board_cards[:4]),
+        cards_to_cardset(board_cards[:5]),
+    ], dtype=jnp.uint32)
+    
     # Determine first player to act (after big blind in preflop)
     current_player = jnp.int32((2 % num_players) if num_players > 2 else 0)
     
@@ -167,6 +178,7 @@ def _init(rng: PRNGKey, num_players: int, stack_size: int, small_blind: int, big
         max_bet=max_bet,
         hole_cardsets=hole_cardsets,
         board_cardset=board_cardset,
+        visible_board_cardsets=visible_board_cardsets,
         hand_final_scores=hand_final_scores,
         current_player=jnp.int32(current_player),
         small_blind=jnp.int32(small_blind),
@@ -466,26 +478,8 @@ def _observe(state: State, player_id: int) -> Array:
     # Own hole cards as cardset
     hole_cardset = state.hole_cardsets[player_id]
     
-    # Visible board cards as cardset - use bitwise operations to mask invisible cards
-    num_board_cards = jnp.array([0, 3, 4, 5], dtype=jnp.int32)
-    num_visible = jnp.where(state.round >= 4, 5, num_board_cards[state.round])
-    
-    # Create mask for invisible cards by getting the future cards and creating their cardset
-    def get_visible_board_cardset():
-        # Get all board cards in original dealing order
-        board_cards = cardset_to_cards(state.board_cardset)[:5]
-        
-        # Create mask for invisible cards (those that come after num_visible)
-        invisible_mask = jnp.arange(5) >= num_visible
-        invisible_cards = jnp.where(invisible_mask, board_cards, -1)
-        
-        # Convert invisible cards to cardset and use bitwise AND with NOT to remove them
-        invisible_cardset = cards_to_cardset(invisible_cards)
-        visible_board_cardset = cardset_and(state.board_cardset, cardset_not(invisible_cardset))
-        
-        return visible_board_cardset
-    
-    visible_board_cardset = jnp.where(num_visible == 0, create_empty_cardset(), get_visible_board_cardset())
+    # Visible board cards as cardset - use pre-computed values (optimized)
+    visible_board_cardset = state.visible_board_cardsets[state.round]
     
     # Build observation array with appropriate types
     # Format: [hole_cardset[2], board_cardset[2], pot, stack, bets[10], folded[10], round]
