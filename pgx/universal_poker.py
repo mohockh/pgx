@@ -75,6 +75,10 @@ class State(core.State):
     num_actions_this_round: Array = jnp.int32(0)
     last_raiser: Array = jnp.int32(-1)
     
+    # Pre-computed masks for performance optimization
+    player_mask: Array = jnp.zeros(MAX_PLAYERS, dtype=jnp.bool_)  # Which positions are valid players
+    active_mask: Array = jnp.zeros(MAX_PLAYERS, dtype=jnp.bool_)  # Which players are not folded/all-in
+    
     @property
     def env_id(self) -> core.EnvId:
         return "universal_poker"
@@ -167,6 +171,10 @@ def _init(rng: PRNGKey, num_players: int, stack_size: int, small_blind: int, big
         cards_to_cardset(board_cards[:5]),
     ], dtype=jnp.uint32)
     
+    # Initialize pre-computed masks for performance optimization
+    player_mask = jnp.arange(MAX_PLAYERS) < num_players
+    active_mask = player_mask.copy()  # Initially all players are active (not folded/all-in)
+    
     # Determine first player to act (after big blind in preflop)
     current_player = jnp.int32((2 % num_players) if num_players > 2 else 0)
     
@@ -183,6 +191,8 @@ def _init(rng: PRNGKey, num_players: int, stack_size: int, small_blind: int, big
         current_player=jnp.int32(current_player),
         small_blind=jnp.int32(small_blind),
         big_blind=jnp.int32(big_blind),
+        player_mask=player_mask,
+        active_mask=active_mask,
         rewards=jnp.zeros(2, dtype=jnp.float32),  # Fixed size for compatibility
     )
     
@@ -212,10 +222,8 @@ def _step(state: State, action: int) -> State:
         new_state
     )
     
-    # Check if game is terminated
-    player_mask = jnp.arange(MAX_PLAYERS) < new_state.num_players
-    active_mask = (~new_state.folded & player_mask)[:MAX_PLAYERS]
-    num_active = jnp.sum(active_mask)
+    # Check if game is terminated (using pre-computed masks)
+    num_active = jnp.sum(new_state.active_mask)
     terminated = (num_active <= 1) | (new_state.round >= 4)
     
     # Calculate rewards and legal actions in single conditional (Phase 1.1: Merge termination checks)
@@ -278,15 +286,15 @@ def _apply_action(state: State, action: int) -> State:
         pot=new_pot,
         max_bet=new_max_bet,
         all_in=new_all_in,
-        last_raiser=new_last_raiser
+        last_raiser=new_last_raiser,
+        active_mask=(~new_folded & ~new_all_in & state.player_mask)
     )
 
 
 def _is_betting_round_over(state: State) -> bool:
     """Check if the current betting round is over. (Phase 3.1: Optimized betting logic)"""
-    # Precompute masks once
-    player_mask = jnp.arange(MAX_PLAYERS) < state.num_players
-    active_mask = (~state.folded & ~state.all_in & player_mask)[:MAX_PLAYERS]
+    # Use pre-computed active mask
+    active_mask = state.active_mask
     
     # If less than 2 active players, round is over
     active_count = jnp.sum(active_mask)
@@ -342,9 +350,8 @@ def _get_next_active_player(state: State) -> int:
     """Get the next active player (not folded or all-in). (Phase 2.1: Vectorized player finding)"""
     current = state.current_player
     
-    # Create a mask for active players
-    player_mask = jnp.arange(MAX_PLAYERS) < state.num_players
-    active_mask = (~state.folded & ~state.all_in & player_mask)[:MAX_PLAYERS]
+    # Use pre-computed active mask
+    active_mask = state.active_mask
     
     # Create priority array: higher values for players that come after current player
     # Players after current get priority (MAX_PLAYERS - distance), others get (2*MAX_PLAYERS - distance)
@@ -374,9 +381,8 @@ def _get_first_player_for_round(state: State, round: int) -> int:
 
 def _get_next_active_player_from(state: State, start_pos: int) -> int:
     """Get next active player starting from a position. (Phase 2.1: Vectorized player finding)"""
-    # Create a mask for active players
-    player_mask = jnp.arange(MAX_PLAYERS) < state.num_players
-    active_mask = (~state.folded & ~state.all_in & player_mask)[:MAX_PLAYERS]
+    # Use pre-computed active mask
+    active_mask = state.active_mask
     
     # Create priority array: higher values for players that come after start_pos
     distances = (jnp.arange(MAX_PLAYERS) - start_pos) % MAX_PLAYERS
@@ -413,9 +419,9 @@ def _calculate_rewards(state: State) -> Array:
     rewards_shape = state.rewards.shape[0]
     rewards = jnp.zeros(rewards_shape, dtype=jnp.float32)
     
-    # Get active players (not folded)
-    player_mask = jnp.arange(rewards_shape) < state.num_players
-    active_mask = (~state.folded[:rewards_shape] & player_mask)
+    # Get active players (not folded) - use pre-computed masks
+    # For rewards, we need players who are not folded (regardless of all-in status)
+    active_mask = (~state.folded & state.player_mask)
     num_active = jnp.sum(active_mask)
     
     # Vectorized reward calculation (Phase 2.2: Eliminate nested conditionals)
@@ -430,17 +436,19 @@ def _calculate_rewards(state: State) -> Array:
     
     # Showdown case: use pre-computed hand evaluations
     # Mask final scores by active players only
-    masked_scores = jnp.where(active_mask, state.hand_final_scores[:rewards_shape], -1)
+    masked_scores = jnp.where(active_mask, state.hand_final_scores, -1)
     best_strength = jnp.max(masked_scores)
     showdown_winners_mask = (masked_scores == best_strength) & active_mask
     showdown_num_winners = jnp.sum(showdown_winners_mask)
     showdown_pot_share = jnp.int32(state.pot // jnp.maximum(showdown_num_winners, 1))
-    showdown_rewards = jnp.where(showdown_winners_mask, showdown_pot_share, 0.0).astype(jnp.float32)
+    showdown_rewards_full = jnp.where(showdown_winners_mask, showdown_pot_share, 0.0).astype(jnp.float32)
+    showdown_rewards = showdown_rewards_full[:rewards_shape]
     
     # Equal split case: split pot among all active players
     equal_num_winners = jnp.sum(active_mask)
     equal_pot_share = jnp.int32(state.pot // jnp.maximum(equal_num_winners, 1))
-    equal_split_rewards = jnp.where(active_mask, equal_pot_share, 0.0).astype(jnp.float32)
+    equal_split_rewards_full = jnp.where(active_mask, equal_pot_share, 0.0).astype(jnp.float32)
+    equal_split_rewards = equal_split_rewards_full[:rewards_shape]
     
     # Select final rewards based on case
     final_rewards = jnp.where(
