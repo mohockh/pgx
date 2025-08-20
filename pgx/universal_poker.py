@@ -67,8 +67,6 @@ class State(core.State):
     
     # Betting info
     first_player: Array = jnp.array([1, 0, 0, 0], dtype=jnp.int32)  # first to act each round
-    small_blind: Array = jnp.int32(1)
-    big_blind: Array = jnp.int32(2)
     max_bet: Array = jnp.int32(0)
     
     # Action tracking
@@ -85,15 +83,83 @@ class State(core.State):
 
 
 class UniversalPoker(core.Env):
-    def __init__(self, num_players: int = 2, stack_size: int = 200, small_blind: int = 1, big_blind: int = 2):
+    def __init__(self, num_players: int = 2, stack_size: int = 200, small_blind: int = 1, big_blind: int = 2, config_str: str = None):
         super().__init__()
+        
+        # Set default values
         self._num_players = num_players
-        self.stack_size = stack_size
-        self.small_blind = small_blind
-        self.big_blind = big_blind
+        
+        # Initialize stack_sizes as MAX_PLAYERS array
+        self.stack_sizes = jnp.zeros(MAX_PLAYERS, dtype=jnp.int32)
+        self.stack_sizes = self.stack_sizes.at[:num_players].set(stack_size)
+        
+        # Initialize blind_amounts as MAX_PLAYERS array with default small/big blind structure
+        self.blind_amounts = jnp.zeros(MAX_PLAYERS, dtype=jnp.int32)
+        self.blind_amounts = self.blind_amounts.at[0].set(small_blind)  # Small blind
+        self.blind_amounts = self.blind_amounts.at[1].set(big_blind)    # Big blind
+        
+        # Parse config string if provided - this will override the defaults above
+        if config_str is not None:
+            self._parse_config_string(config_str)
+    
+    def _parse_config_string(self, config_str: str):
+        """Parse GAMEDEF config string similar to C++ readGame function."""
+        if not config_str.strip().startswith("GAMEDEF"):
+            raise ValueError("Config string must start with 'GAMEDEF'")
+        if not config_str.strip().endswith("END GAMEDEF"):
+            raise ValueError("Config string must end with 'END GAMEDEF'")
+        
+        lines = config_str.strip().split('\n')
+        
+        for line in lines:
+            line = line.strip().lower()
+            
+            # Skip comments and empty lines
+            if line.startswith('#') or not line or line == "GAMEDEF" or line == "END GAMEDEF":
+                continue
+            
+            # Parse each configuration line
+            if line.startswith("stack"):
+                # stack = 200 200 or stack = 200
+                values = self._parse_config_line(line, "stack")
+                if values:
+                    # Reset stack_sizes array and populate with config values
+                    self.stack_sizes = jnp.zeros(MAX_PLAYERS, dtype=jnp.int32)
+                    num_values = min(len(values), MAX_PLAYERS)
+                    self.stack_sizes = self.stack_sizes.at[:num_values].set(jnp.array(values[:num_values]))
+                
+            elif line.startswith("blind"):
+                # blind = 1 2 0 0 ...
+                values = self._parse_config_line(line, "blind")
+                if values:
+                    # Reset blind_amounts array and populate with config values
+                    self.blind_amounts = jnp.zeros(MAX_PLAYERS, dtype=jnp.int32)
+                    num_values = min(len(values), MAX_PLAYERS)
+                    self.blind_amounts = self.blind_amounts.at[:num_values].set(jnp.array(values[:num_values]))
+                
+            elif line.startswith("numplayers"):
+                # numplayers = 2
+                values = self._parse_config_line(line, "numplayers")
+                self._num_players = values[0]
+    
+    def _parse_config_line(self, line: str, key: str):
+        """Parse a config line like 'key = value1 value2 ...' and return list of integer values."""
+        try:
+            # Remove the key and find the '=' sign
+            if '=' in line:
+                _, value_part = line.split('=', 1)
+                value_part = value_part.strip()
+                
+                # Split values and convert to integers
+                if value_part:
+                    values = [int(x.strip()) for x in value_part.split() if x.strip()]
+                    return values
+            return []
+        except ValueError:
+            raise ValueError(f"Invalid config line: {line}")
         
     def _init(self, key: PRNGKey) -> State:
-        return _init(key, self._num_players, self.stack_size, self.small_blind, self.big_blind)
+        return _init(key, self._num_players, self.stack_sizes, self.blind_amounts)
     
     def _step(self, state: core.State, action: Array, key) -> State:
         del key
@@ -117,23 +183,19 @@ class UniversalPoker(core.Env):
         return self._num_players
 
 
-def _init(rng: PRNGKey, num_players: int, stack_size: int, small_blind: int, big_blind: int) -> State:
+def _init(rng: PRNGKey, num_players: int, stack_sizes, blind_amounts) -> State:
     """Initialize a new poker hand."""
-    # Initialize stacks
-    stacks = jnp.zeros(MAX_PLAYERS, dtype=jnp.int32)
-    stacks = stacks.at[:num_players].set(stack_size)
+    # Initialize stacks using stack_sizes (already MAX_PLAYERS sized with zeros for inactive players)
+    stacks = jnp.array(stack_sizes, dtype=jnp.int32)
     
-    # Post blinds
-    bets = jnp.zeros(MAX_PLAYERS, dtype=jnp.int32)
-    bets = bets.at[0].set(small_blind)  # Small blind
-    bets = bets.at[1].set(big_blind)    # Big blind
+    # Post blinds using blind_amounts array (already MAX_PLAYERS sized)
+    bets = jnp.array(blind_amounts, dtype=jnp.int32)
     
     # Update stacks after posting blinds
-    stacks = stacks.at[0].subtract(small_blind)
-    stacks = stacks.at[1].subtract(big_blind)
+    stacks = stacks - bets
     
-    pot = jnp.int32(small_blind + big_blind)
-    max_bet = jnp.int32(big_blind)
+    pot = jnp.int32(jnp.sum(bets))
+    max_bet = jnp.int32(jnp.max(bets))
     
     # Deal hole cards using vectorized approach - deal to all MAX_PLAYERS positions
     rng, subkey = jax.random.split(rng)
@@ -183,8 +245,6 @@ def _init(rng: PRNGKey, num_players: int, stack_size: int, small_blind: int, big
         visible_board_cardsets=visible_board_cardsets,
         hand_final_scores=hand_final_scores,
         current_player=jnp.int32(current_player),
-        small_blind=jnp.int32(small_blind),
-        big_blind=jnp.int32(big_blind),
         player_mask=player_mask,
         active_mask=active_mask,
         rewards=jnp.zeros(2, dtype=jnp.float32),  # Fixed size for compatibility
@@ -257,7 +317,9 @@ def _apply_action(state: State, action: int) -> State:
     call_amount = jnp.int32(state.max_bet - state.bets[current_player])
     actual_call = jnp.minimum(call_amount, state.stacks[current_player])
     
-    min_raise = jnp.where(state.max_bet == 0, state.big_blind, jnp.int32(state.max_bet * 2))
+    # Use the maximum blind amount as the minimum bet when max_bet is 0
+    min_blind = jnp.max(state.bets)  # Get the largest blind that was posted
+    min_raise = jnp.where(state.max_bet == 0, min_blind, jnp.int32(state.max_bet * 2))
     raise_amount = jnp.int32(min_raise - state.bets[current_player])
     actual_raise = jnp.minimum(raise_amount, state.stacks[current_player])
     

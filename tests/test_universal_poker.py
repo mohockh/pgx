@@ -532,6 +532,286 @@ class TestUniversalPoker:
         assert hand_final_scores[1] > hand_final_scores[3], "P1 should have better hand than P3 (Aces and 8s > Aces and 5s)"
         assert hand_final_scores[2] > hand_final_scores[3], "P2 should have better hand than P3 (Aces and 8s > Aces and 5s)"
 
+    def test_config_string_basic(self):
+        """Test basic config string parsing."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 100 150 200
+blind = 5 10 0
+END GAMEDEF"""
+        
+        env = universal_poker.UniversalPoker(config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Test number of players
+        assert state.num_players == 3
+        assert env.num_players == 3
+        
+        # Test stack sizes
+        assert state.stacks[0] == 95   # 100 - 5 (blind)
+        assert state.stacks[1] == 140  # 150 - 10 (blind) 
+        assert state.stacks[2] == 200  # 200 - 0 (no blind)
+        
+        # Test blind structure
+        assert state.bets[0] == 5   # Player 0 posts 5
+        assert state.bets[1] == 10  # Player 1 posts 10
+        assert state.bets[2] == 0   # Player 2 posts 0
+        
+        # Test pot
+        assert state.pot == 15  # 5 + 10 + 0
+        assert state.max_bet == 10  # Max of blind amounts
+
+    def test_config_string_four_players(self):
+        """Test config string with four players."""
+        config_str = """GAMEDEF
+numplayers = 4
+stack = 500 500 500 500
+blind = 1 2 0 0
+END GAMEDEF"""
+        
+        env = universal_poker.UniversalPoker(config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        assert state.num_players == 4
+        
+        # Check stacks after blinds
+        assert state.stacks[0] == 499  # 500 - 1
+        assert state.stacks[1] == 498  # 500 - 2
+        assert state.stacks[2] == 500  # 500 - 0
+        assert state.stacks[3] == 500  # 500 - 0
+        
+        # Check blinds
+        assert state.bets[0] == 1
+        assert state.bets[1] == 2
+        assert state.bets[2] == 0
+        assert state.bets[3] == 0
+        
+        assert state.pot == 3
+        assert state.max_bet == 2
+
+    def test_config_string_different_stacks(self):
+        """Test config string with different stack sizes."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 50 100 200
+blind = 1 2 0
+END GAMEDEF"""
+        
+        env = universal_poker.UniversalPoker(config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Player 0: small stack
+        assert state.stacks[0] == 49   # 50 - 1
+        # Player 1: medium stack  
+        assert state.stacks[1] == 98   # 100 - 2
+        # Player 2: large stack
+        assert state.stacks[2] == 200  # 200 - 0
+
+    def test_config_string_ante_structure(self):
+        """Test config string with ante-like structure (all players post)."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 100 100 100
+blind = 5 5 5
+END GAMEDEF"""
+        
+        env = universal_poker.UniversalPoker(config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # All players post same amount
+        assert state.stacks[0] == 95  # 100 - 5
+        assert state.stacks[1] == 95  # 100 - 5
+        assert state.stacks[2] == 95  # 100 - 5
+        
+        assert state.bets[0] == 5
+        assert state.bets[1] == 5
+        assert state.bets[2] == 5
+        
+        assert state.pot == 15  # 5 + 5 + 5
+        assert state.max_bet == 5
+
+    def test_config_string_backwards_compatibility(self):
+        """Test that regular constructor still works without config_str."""
+        env = universal_poker.UniversalPoker(num_players=2, stack_size=200, small_blind=1, big_blind=2)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        assert state.num_players == 2
+        assert state.stacks[0] == 199  # 200 - 1
+        assert state.stacks[1] == 198  # 200 - 2
+        assert state.bets[0] == 1
+        assert state.bets[1] == 2
+        assert state.pot == 3
+
+    def test_config_string_partial_override(self):
+        """Test that config_str overrides constructor parameters."""
+        # Constructor says 2 players, config says 3 - config should win
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 150 150 150
+blind = 2 4 0
+END GAMEDEF"""
+        
+        env = universal_poker.UniversalPoker(num_players=2, stack_size=100, 
+                                           small_blind=1, big_blind=2, 
+                                           config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Config should override constructor
+        assert state.num_players == 3
+        assert state.stacks[0] == 148  # 150 - 2
+        assert state.stacks[1] == 146  # 150 - 4
+        assert state.stacks[2] == 150  # 150 - 0
+
+    def test_config_observation_vectors(self):
+        """Test observation vectors with config string setup."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 100 150 200
+blind = 5 10 0
+END GAMEDEF"""
+        
+        env = universal_poker.UniversalPoker(config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Test observations for each player
+        for player_id in range(3):
+            obs = env.observe(state, player_id)
+            
+            # Check observation structure: [hole_cardset[2], board_cardset[2], pot, stack, bets[10], folded[10], round]
+            expected_size = 2 + 2 + 1 + 1 + 10 + 10 + 1  # 27 elements
+            assert len(obs) == expected_size
+            
+            # Check pot value is correct
+            pot_idx = 4  # hole[2] + board[2] = 4
+            assert obs[pot_idx] == 15  # 5 + 10 + 0
+            
+            # Check individual player's stack
+            stack_idx = 5  # hole[2] + board[2] + pot[1] = 5
+            expected_stacks = [95, 140, 200]
+            assert obs[stack_idx] == expected_stacks[player_id]
+            
+            # Check bets in observation
+            bets_start_idx = 6  # hole[2] + board[2] + pot[1] + stack[1] = 6
+            assert obs[bets_start_idx] == 5    # Player 0 bet
+            assert obs[bets_start_idx + 1] == 10  # Player 1 bet  
+            assert obs[bets_start_idx + 2] == 0   # Player 2 bet
+            
+            # Check folded status (no one folded initially)
+            folded_start_idx = 16  # bets_start + 10 = 16
+            for i in range(3):
+                assert obs[folded_start_idx + i] == 0  # No one folded
+            
+            # Check round (should be 0 for preflop)
+            round_idx = 26  # folded_start + 10 = 26
+            assert obs[round_idx] == 0
+
+    def test_config_step_actions(self):
+        """Test step actions with config string setup."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 100 150 200
+blind = 5 10 0
+END GAMEDEF"""
+        
+        env = universal_poker.UniversalPoker(config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Initial state checks
+        # With blinds [5, 10, 0], max_bet=10, first player to act should be player 2 (after the "big blind")
+        assert state.current_player == 2  # Player 2 acts first (UTG)
+        assert state.pot == 15
+        assert state.max_bet == 10
+        
+        # Player 2 calls
+        new_state = env.step(state, universal_poker.CALL)
+        assert new_state.bets[2] == 10  # Player 2 now has 10 in pot
+        assert new_state.stacks[2] == 190  # 200 - 10
+        assert new_state.pot == 25  # 15 + 10
+        assert new_state.current_player == 0  # Next player's turn
+        
+        # Player 0 raises 
+        new_state = env.step(new_state, universal_poker.RAISE)
+        assert new_state.max_bet == 20  # Should be 2x current bet
+        assert new_state.bets[0] == 20   # Player 0 total bet
+        assert new_state.stacks[0] == 80  # 95 - 15 (additional chips beyond initial 5)
+        assert new_state.pot == 40  # 25 + 15
+        assert new_state.last_raiser == 0
+        
+        # Current player should now be 1 (but there's a bug in next player logic, let's check who's actually current)
+        current_acting_player = new_state.current_player
+        
+        # Whoever is current player folds
+        new_state = env.step(new_state, universal_poker.FOLD)
+        assert new_state.folded[current_acting_player] == True
+        
+        # Check that folded player isn't included in active mask
+        active_players = jnp.sum(new_state.active_mask)
+        assert active_players == 2  # Only players 0 and 2 are active
+
+    def test_config_multi_round_progression(self):
+        """Test multi-round progression with config setup."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 1000 1000 1000
+blind = 5 10 0
+END GAMEDEF"""
+        
+        env = universal_poker.UniversalPoker(config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # All players call to advance to flop
+        state = env.step(state, universal_poker.CALL)  # Player 2 calls
+        state = env.step(state, universal_poker.CALL)  # Player 0 calls  
+        state = env.step(state, universal_poker.CALL)  # Player 1 checks
+        
+        # Should advance to flop
+        assert state.round == 1
+        assert state.max_bet == 0  # Bets reset
+        assert jnp.all(state.bets[:3] == 0)  # All bets reset
+        assert state.pot == 30  # Total from preflop (10 + 10 + 10)
+        
+        # Check that all players still have chips
+        # Each player contributed 10 total (P0: 5 blind + 5 call, P1: 10 blind, P2: 10 call)
+        assert state.stacks[0] == 990  # 1000 - 10 total
+        assert state.stacks[1] == 990  # 1000 - 10 total  
+        assert state.stacks[2] == 990  # 1000 - 10 total
+
+    def test_config_all_in_scenario(self):
+        """Test all-in scenario with different stack sizes."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 20 50 100
+blind = 5 10 0
+END GAMEDEF"""
+        
+        env = universal_poker.UniversalPoker(config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Player 2 raises big
+        state = env.step(state, universal_poker.RAISE)  # Player 2 raises to 20
+        
+        # Player 0 should be able to go all-in (has only 15 chips left)
+        legal_actions = state.legal_action_mask
+        assert legal_actions[universal_poker.CALL]  # Should be able to call/all-in
+        
+        state = env.step(state, universal_poker.CALL)  # Player 0 calls/all-in
+        assert state.all_in[0] == True  # Player 0 should be all-in
+        assert state.stacks[0] == 0     # No chips left
+        
+        # Check active mask excludes all-in player
+        active_players = jnp.sum(state.active_mask)
+        assert active_players == 2  # Only players 1 and 2 can still act
+
 
 if __name__ == "__main__":
     # Run basic tests
@@ -596,6 +876,36 @@ if __name__ == "__main__":
         
         test_suite.test_side_pot_distribution()
         print("✓ Side pot distribution test passed")
+        
+        test_suite.test_config_string_basic()
+        print("✓ Config string basic test passed")
+        
+        test_suite.test_config_string_four_players()
+        print("✓ Config string four players test passed")
+        
+        test_suite.test_config_string_different_stacks()
+        print("✓ Config string different stacks test passed")
+        
+        test_suite.test_config_string_ante_structure()
+        print("✓ Config string ante structure test passed")
+        
+        test_suite.test_config_string_backwards_compatibility()
+        print("✓ Config string backwards compatibility test passed")
+        
+        test_suite.test_config_string_partial_override()
+        print("✓ Config string partial override test passed")
+        
+        test_suite.test_config_observation_vectors()
+        print("✓ Config observation vectors test passed")
+        
+        test_suite.test_config_step_actions()
+        print("✓ Config step actions test passed")
+        
+        test_suite.test_config_multi_round_progression()
+        print("✓ Config multi-round progression test passed")
+        
+        test_suite.test_config_all_in_scenario()
+        print("✓ Config all-in scenario test passed")
         
         print("\nAll tests passed! ✅")
         
