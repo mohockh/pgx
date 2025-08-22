@@ -23,7 +23,12 @@ class TestUniversalPoker:
         
     def test_init_custom_params(self):
         """Test initialization with custom parameters."""
-        env = universal_poker.UniversalPoker(num_players=3, stack_size=100, small_blind=5, big_blind=10)
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 100 100 100
+blind = 5 10 0
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -133,7 +138,12 @@ class TestUniversalPoker:
         
     def test_all_in_scenario(self):
         """Test all-in scenario."""
-        env = universal_poker.UniversalPoker(stack_size=10)  # Small stacks
+        config_str = """GAMEDEF
+numplayers = 2
+stack = 10 10
+blind = 1 2
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)  # Small stacks
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -167,8 +177,8 @@ class TestUniversalPoker:
             # New format uses mixed int64/int32 types, so we check the overall type
             assert obs.dtype in [jnp.int64, jnp.int32]  # Concatenation promotes to consistent type
             
-            # Check new observation size: [hole_cardset[2], board_cardset[2], pot, stack, bets[10], folded[10], round]
-            expected_size = 2 + 2 + 1 + 1 + 10 + 10 + 1  # cardsets uint32[2] + game state
+            # Check new observation size: [hole_cardset[2], board_cardset[2], pot, stack, bets[num_players], folded[num_players], round]
+            expected_size = 2 + 2 + 1 + 1 + state.num_players + state.num_players + 1  # cardsets uint32[2] + game state
             assert len(obs) == expected_size
             
             # Verify cardset components are present (first four elements)
@@ -295,7 +305,12 @@ class TestUniversalPoker:
     def test_all_in_raise_insufficient_minimum(self):
         """Test that a player can raise all-in even when they don't have enough for the minimum raise."""
         # Set up scenario where Player 1 has insufficient chips for minimum raise but can go all-in
-        env = universal_poker.UniversalPoker(stack_size=5, small_blind=1, big_blind=2)
+        config_str = """GAMEDEF
+numplayers = 2
+stack = 5 5
+blind = 1 2
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -407,7 +422,12 @@ class TestUniversalPoker:
         assert state.num_players == 2
         
         # Test with very small stacks
-        env = universal_poker.UniversalPoker(stack_size=3, small_blind=1, big_blind=2)
+        config_str = """GAMEDEF
+numplayers = 2
+stack = 3 3
+blind = 1 2
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
         state = env.init(key)
         assert state.stacks[0] == 2  # Almost all-in from start
         assert state.stacks[1] == 1  # Almost all-in from start
@@ -421,14 +441,19 @@ class TestUniversalPoker:
         stacks = [10, 20, 30, 50]
         
         # Create state manually to control card distribution
-        env = universal_poker.UniversalPoker(num_players=4, stack_size=50, small_blind=1, big_blind=2)
+        config_str = """GAMEDEF
+numplayers = 4
+stack = 50 50 50 50
+blind = 1 2 0 0
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=4, config_str=config_str)
         key = jax.random.PRNGKey(42)
         
         # Initialize basic state
         state = env.init(key)
         
         # Override stacks
-        new_stacks = jnp.zeros(universal_poker.MAX_PLAYERS, dtype=jnp.int32)
+        new_stacks = jnp.zeros(4, dtype=jnp.int32)
         new_stacks = new_stacks.at[:4].set(jnp.array(stacks))
         state = state.replace(stacks=new_stacks)
         
@@ -451,7 +476,7 @@ class TestUniversalPoker:
         board_cards = [12, 25, 3, 16, 46]  # Ac=12, Ad=25, 5c=3, 5d=16, 9s=46
         
         # Convert to cardsets
-        new_hole_cardsets = jnp.zeros((universal_poker.MAX_PLAYERS, 2), dtype=jnp.uint32)
+        new_hole_cardsets = jnp.zeros((4, 2), dtype=jnp.uint32)
         for i in range(4):
             hole_cardset = cards_to_cardset(jnp.array(hole_cards_list[i]))
             new_hole_cardsets = new_hole_cardsets.at[i].set(hole_cardset)
@@ -462,7 +487,7 @@ class TestUniversalPoker:
         from pgx.poker_eval.jax_evaluator_new import evaluate_hand
         from pgx.poker_eval.cardset import cardset_or
         
-        board_cardsets_tiled = jnp.tile(board_cardset[None, :], (universal_poker.MAX_PLAYERS, 1))
+        board_cardsets_tiled = jnp.tile(board_cardset[None, :], (4, 1))
         combined_cardsets = cardset_or(new_hole_cardsets, board_cardsets_tiled)
         hand_final_scores = jax.vmap(evaluate_hand)(combined_cardsets)
         
@@ -473,14 +498,14 @@ class TestUniversalPoker:
             hand_final_scores=hand_final_scores,
             round=4,  # Set to river (showdown)
             terminated=True,  # Force termination for reward calculation
-            folded=jnp.zeros(universal_poker.MAX_PLAYERS, dtype=jnp.bool_)  # No one folded
+            folded=jnp.zeros(4, dtype=jnp.bool_)  # No one folded
         )
         
         # Set up final pot scenario - all players all-in with different contribution amounts
         # P0 contributed 10, P1 contributed 20, P2 contributed 30, P3 contributed 50
         # This creates the side pot structure we want to test
         
-        final_bets = jnp.array([10, 20, 30, 50] + [0] * (universal_poker.MAX_PLAYERS - 4))
+        final_bets = jnp.array([10, 20, 30, 50])
         total_pot = 10 + 20 + 30 + 50  # 110
         
         state = state.replace(
@@ -490,7 +515,7 @@ class TestUniversalPoker:
         )
         
         # Calculate rewards using the new side pot algorithm
-        rewards = universal_poker._calculate_rewards(state)
+        rewards = env._calculate_rewards(state)
         
         # Expected side pot distribution with contributions [10, 20, 30, 50]:
         # Pot levels: [0, 10, 20, 30, 50]  
@@ -540,7 +565,7 @@ stack = 100 150 200
 blind = 5 10 0
 END GAMEDEF"""
         
-        env = universal_poker.UniversalPoker(config_str=config_str)
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -570,7 +595,7 @@ stack = 500 500 500 500
 blind = 1 2 0 0
 END GAMEDEF"""
         
-        env = universal_poker.UniversalPoker(config_str=config_str)
+        env = universal_poker.UniversalPoker(num_players=4, config_str=config_str)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -599,7 +624,7 @@ stack = 50 100 200
 blind = 1 2 0
 END GAMEDEF"""
         
-        env = universal_poker.UniversalPoker(config_str=config_str)
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -618,7 +643,7 @@ stack = 100 100 100
 blind = 5 5 5
 END GAMEDEF"""
         
-        env = universal_poker.UniversalPoker(config_str=config_str)
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -636,7 +661,12 @@ END GAMEDEF"""
 
     def test_config_string_backwards_compatibility(self):
         """Test that regular constructor still works without config_str."""
-        env = universal_poker.UniversalPoker(num_players=2, stack_size=200, small_blind=1, big_blind=2)
+        config_str = """GAMEDEF
+numplayers = 2
+stack = 200 200
+blind = 1 2
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -648,17 +678,15 @@ END GAMEDEF"""
         assert state.pot == 3
 
     def test_config_string_partial_override(self):
-        """Test that config_str overrides constructor parameters."""
-        # Constructor says 2 players, config says 3 - config should win
+        """Test that config_str validates constructor parameters."""
+        # Constructor and config should match
         config_str = """GAMEDEF
 numplayers = 3
 stack = 150 150 150
 blind = 2 4 0
 END GAMEDEF"""
         
-        env = universal_poker.UniversalPoker(num_players=2, stack_size=100, 
-                                           small_blind=1, big_blind=2, 
-                                           config_str=config_str)
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -676,7 +704,7 @@ stack = 100 150 200
 blind = 5 10 0
 END GAMEDEF"""
         
-        env = universal_poker.UniversalPoker(config_str=config_str)
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -684,8 +712,8 @@ END GAMEDEF"""
         for player_id in range(3):
             obs = env.observe(state, player_id)
             
-            # Check observation structure: [hole_cardset[2], board_cardset[2], pot, stack, bets[10], folded[10], round]
-            expected_size = 2 + 2 + 1 + 1 + 10 + 10 + 1  # 27 elements
+            # Check observation structure: [hole_cardset[2], board_cardset[2], pot, stack, bets[num_players], folded[num_players], round]
+            expected_size = 2 + 2 + 1 + 1 + 3 + 3 + 1  # 13 elements for 3 players
             assert len(obs) == expected_size
             
             # Check pot value is correct
@@ -704,12 +732,12 @@ END GAMEDEF"""
             assert obs[bets_start_idx + 2] == 0   # Player 2 bet
             
             # Check folded status (no one folded initially)
-            folded_start_idx = 16  # bets_start + 10 = 16
+            folded_start_idx = 9  # bets_start + 3 = 9 (3 players)
             for i in range(3):
                 assert obs[folded_start_idx + i] == 0  # No one folded
             
             # Check round (should be 0 for preflop)
-            round_idx = 26  # folded_start + 10 = 26
+            round_idx = 12  # folded_start + 3 = 12 (3 players)
             assert obs[round_idx] == 0
 
     def test_config_step_actions(self):
@@ -720,7 +748,7 @@ stack = 100 150 200
 blind = 5 10 0
 END GAMEDEF"""
         
-        env = universal_poker.UniversalPoker(config_str=config_str)
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -764,7 +792,7 @@ stack = 1000 1000 1000
 blind = 5 10 0
 END GAMEDEF"""
         
-        env = universal_poker.UniversalPoker(config_str=config_str)
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -793,7 +821,7 @@ stack = 20 50 100
 blind = 5 10 0
 END GAMEDEF"""
         
-        env = universal_poker.UniversalPoker(config_str=config_str)
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         

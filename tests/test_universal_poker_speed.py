@@ -82,7 +82,12 @@ def benchmark_speed_vectorized(num_hands_to_benchmark: list, max_batch_size: int
     print("Universal Poker Speed Benchmark (Vectorized)")
     print("=" * 60)
     
-    env = UniversalPoker(num_players=8, stack_size=100)
+    config_str = """GAMEDEF
+numplayers = 8
+stack = 100 100 100 100 100 100 100 100
+blind = 1 2 0 0 0 0 0 0
+END GAMEDEF"""
+    env = UniversalPoker(num_players=8, config_str=config_str)
     
     # JIT compile the vectorized function
     play_vectorized_jit = jax.jit(play_random_hands_vectorized, static_argnums=(0,))
@@ -134,7 +139,12 @@ def benchmark_speed(num_hands_to_benchmark: list):
     print("Universal Poker Speed Benchmark (Serial)")
     print("=" * 60)
     
-    env = UniversalPoker(num_players=2, stack_size=100)
+    config_str = """GAMEDEF
+numplayers = 2
+stack = 100 100
+blind = 1 2
+END GAMEDEF"""
+    env = UniversalPoker(num_players=2, config_str=config_str)
     
     for num_hands in num_hands_to_benchmark:
         print(f"\nTesting {num_hands} hands:")
