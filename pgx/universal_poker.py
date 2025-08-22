@@ -88,12 +88,26 @@ class UniversalPoker(core.Env):
         
         # Set default values
         self._num_players = num_players
+        self._num_rounds = 4  # Default: preflop, flop, turn, river
         
         # Initialize stack_sizes as self._num_players array
         self.stack_sizes = 200 * jnp.ones(self._num_players, dtype=jnp.int32)
         
         # Initialize blind_amounts as self._num_players array with default small/big blind structure
         self.blind_amounts = jnp.array([1, 2] + [0, ] * (self._num_players - 2), dtype=jnp.int32)
+        
+        # Initialize first_player_array with default values
+        # ACPC format uses 1-based indexing, so we convert to 0-based
+        if self._num_players == 2:
+            # Heads-up: dealer/SB acts first preflop, BB acts first post-flop
+            # 1-based: [1, 2] -> 0-based: [0, 1]
+            default_first_players = [0] + [1] * (self._num_rounds - 1)
+        else:
+            # Multi-way: hardcoded pattern [3, 1, 1, 1] in 1-based -> [2, 0, 0, 0] in 0-based
+            preflop_first = (3 - 1) % self._num_players  # 3 -> 2 (0-based)
+            postflop_first = (1 - 1) % self._num_players  # 1 -> 0 (0-based)
+            default_first_players = [preflop_first] + [postflop_first] * (self._num_rounds - 1)
+        self.first_player_array = jnp.array(default_first_players, dtype=jnp.int32)
         
         # Parse config string if provided - this will override the defaults above
         if config_str is not None:
@@ -139,6 +153,34 @@ class UniversalPoker(core.Env):
                 values = self._parse_config_line(line, "numplayers")
                 if values:
                     assert values[0] == self._num_players
+                
+            elif line.startswith("numrounds"):
+                # numrounds = 4
+                values = self._parse_config_line(line, "numrounds")
+                if values:
+                    self._num_rounds = values[0]
+                    # Update first_player_array size when num_rounds changes
+                    # ACPC format uses 1-based indexing, so we convert to 0-based
+                    if self._num_players == 2:
+                        # Heads-up: dealer/SB acts first preflop, BB acts first post-flop
+                        default_first_players = [0] + [1] * (self._num_rounds - 1)
+                    else:
+                        # Multi-way: hardcoded pattern [3, 1, 1, 1] in 1-based -> [2, 0, 0, 0] in 0-based
+                        preflop_first = (3 - 1) % self._num_players
+                        postflop_first = (1 - 1) % self._num_players
+                        default_first_players = [preflop_first] + [postflop_first] * (self._num_rounds - 1)
+                    self.first_player_array = jnp.array(default_first_players, dtype=jnp.int32)
+                
+            elif line.startswith("firstplayer"):
+                # firstplayer = 3 1 1 1  (first player for each round, 1-based)
+                values = self._parse_config_line(line, "firstplayer")
+                if values:
+                    # Convert from 1-based to 0-based indexing
+                    zero_based_values = [(v - 1) % self._num_players for v in values]
+                    # Create array with specified values, pad with zeros if needed
+                    first_players = jnp.zeros(self._num_rounds, dtype=jnp.int32)
+                    num_values = min(len(zero_based_values), self._num_rounds)
+                    self.first_player_array = first_players.at[:num_values].set(jnp.array(zero_based_values[:num_values]))
     
     def _parse_config_line(self, line: str, key: str):
         """Parse a config line like 'key = value1 value2 ...' and return list of integer values."""
@@ -202,8 +244,8 @@ class UniversalPoker(core.Env):
         player_mask = jnp.arange(self._num_players) < self._num_players
         active_mask = player_mask.copy()  # Initially all players are active (not folded/all-in)
         
-        # Determine first player to act (after big blind in preflop)
-        current_player = jnp.int32((2 % self._num_players) if self._num_players > 2 else 0)
+        # Determine first player to act from first_player_array (round 0 = preflop)
+        current_player = jnp.int32(self.first_player_array[0])
         
         state = State(
             num_players=self._num_players,
@@ -221,6 +263,7 @@ class UniversalPoker(core.Env):
             player_mask=player_mask,
             active_mask=active_mask,
             rewards=jnp.zeros(2, dtype=jnp.float32),  # Fixed size for compatibility
+            terminated=False,
         )
         
         # Set legal actions
@@ -253,7 +296,7 @@ class UniversalPoker(core.Env):
         
         # Check if game is terminated (using pre-computed masks)
         num_active = jnp.sum(new_state.active_mask)
-        terminated = (num_active <= 1) | (new_state.round >= 4)
+        terminated = (num_active <= 1) | (new_state.round >= self._num_rounds)
         
         # Calculate rewards and legal actions in single conditional (Phase 1.1: Merge termination checks)
         def terminated_updates():
@@ -272,11 +315,13 @@ class UniversalPoker(core.Env):
             active_updates
         )
         
-        return new_state.replace(
+        new_state = new_state.replace(
             terminated=terminated,
             rewards=rewards,
             legal_action_mask=legal_action_mask
         )
+
+        return new_state
     
     def _observe(self, state: core.State, player_id: Array) -> Array:
         """Generate observation for a specific player."""
@@ -344,7 +389,8 @@ class UniversalPoker(core.Env):
             max_bet=new_max_bet,
             all_in=new_all_in,
             last_raiser=new_last_raiser,
-            active_mask=(~new_folded & ~new_all_in & state.player_mask)
+            active_mask=(~new_folded & ~new_all_in & state.player_mask),
+            num_actions_this_round=state.num_actions_this_round + 1
         )
 
     def _is_betting_round_over(self, state: State) -> bool:
@@ -365,7 +411,11 @@ class UniversalPoker(core.Env):
         all_active_called = jnp.all(active_bets_match_max)
         
         # Combine conditions efficiently
-        return (active_count < 2) | (all_active_called & (state.num_actions_this_round > 0))
+        # Betting round is over if:
+        # 1. Less than 2 active players, OR
+        # 2. All active players have called AND all active players have had a chance to act
+        all_players_acted = state.num_actions_this_round >= active_count
+        return (active_count < 2) | (all_active_called & all_players_acted)
 
     def _advance_round(self, state: State) -> State:
         """Advance to the next betting round."""
@@ -392,11 +442,9 @@ class UniversalPoker(core.Env):
     def _next_player(self, state: State) -> State:
         """Move to the next player."""
         next_player = self._get_next_active_player(state)
-        num_actions_this_round = jnp.int32(state.num_actions_this_round + 1)
         
         return state.replace(
-            current_player=next_player,
-            num_actions_this_round=num_actions_this_round
+            current_player=next_player
         )
 
     def _get_next_active_player(self, state: State) -> int:
@@ -407,13 +455,12 @@ class UniversalPoker(core.Env):
         active_mask = state.active_mask
         
         # Create priority array: higher values for players that come after current player
-        # Players after current get priority (num_players - distance), others get (2*num_players - distance)
-        distances = (jnp.arange(self._num_players) - current - 1) % self._num_players
-        priorities = jnp.where(
-            jnp.arange(self._num_players) > current,
-            self._num_players - distances,
-            2 * self._num_players - distances
-        )
+        # Calculate distance from current player in circular order
+        player_indices = jnp.arange(self._num_players)
+        distances = (player_indices - current - 1) % self._num_players
+        # Give highest priority to the closest player after current (lowest distance)
+        # Invert distance so closer players get higher priority
+        priorities = self._num_players - distances
         
         # Set inactive players to have very low priority
         priorities = jnp.where(active_mask, priorities, -1)
@@ -425,9 +472,8 @@ class UniversalPoker(core.Env):
 
     def _get_first_player_for_round(self, state: State, round: int) -> int:
         """Get the first player to act in a given round."""
-        # In post-flop rounds, small blind acts first
-        # Preflop: player after big blind acts first
-        start_pos = jnp.where(round > 0, jnp.int32(0), jnp.int32(2 % self._num_players))
+        # Use the configured first player for this round
+        start_pos = self.first_player_array[round]
         return self._get_next_active_player_from(state, start_pos)
 
     def _get_next_active_player_from(self, state: State, start_pos: int) -> int:
@@ -453,7 +499,7 @@ class UniversalPoker(core.Env):
         
         # Calculate legal actions regardless of termination state
         can_fold = ~state.all_in[current_player]
-        can_call = (state.bets[current_player] < state.max_bet) & (state.stacks[current_player] > 0)
+        can_call = (state.bets[current_player] <= state.max_bet) & (state.stacks[current_player] > 0)
         total_chips = state.stacks[current_player] + state.bets[current_player]
         can_raise = total_chips > state.max_bet
         
@@ -470,7 +516,7 @@ class UniversalPoker(core.Env):
         
         # Handle single winner case (early fold scenarios)
         is_single_winner = num_active == 1
-        reached_showdown = state.round >= 4
+        reached_showdown = state.round >= self._num_rounds
         is_showdown = (~is_single_winner) & reached_showdown
         
         def single_winner_case():

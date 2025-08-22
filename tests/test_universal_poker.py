@@ -840,6 +840,128 @@ END GAMEDEF"""
         active_players = jnp.sum(state.active_mask)
         assert active_players == 2  # Only players 1 and 2 can still act
 
+    def test_numrounds_three_rounds(self):
+        """Test config string with numRounds = 3 (preflop, flop, turn only - no river)."""
+        config_str = """GAMEDEF
+numplayers = 2
+numrounds = 3
+stack = 100 100
+blind = 1 2
+END GAMEDEF"""
+        
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Game should have 3 rounds instead of default 4
+        assert hasattr(env, '_num_rounds'), "Environment should store num_rounds"
+        assert env._num_rounds == 3, f"Expected 3 rounds, got {env._num_rounds}"
+        
+        # Game should terminate after round 2 (0=preflop, 1=flop, 2=turn, 3=river not reached)
+        # Play through to check termination condition
+        state = env.step(state, universal_poker.CALL)  # Player calls
+        state = env.step(state, universal_poker.CALL)  # Player checks, advance to flop
+        assert state.round == 1, "Should be on flop"
+        
+        state = env.step(state, universal_poker.CALL)  # Player checks
+        state = env.step(state, universal_poker.CALL)  # Player checks, advance to turn
+        assert state.round == 2, "Should be on turn"
+        
+        state = env.step(state, universal_poker.CALL)  # Player checks
+        state = env.step(state, universal_poker.CALL)  # Player checks, should terminate
+        
+        # Game should terminate after turn (round 2) since numrounds=3
+        assert state.terminated, "Game should terminate after 3 rounds"
+        assert state.round >= 3, "Game should have reached final round"
+
+    def test_numrounds_two_rounds(self):
+        """Test config string with numRounds = 2 (preflop and flop only)."""
+        config_str = """GAMEDEF
+numplayers = 2
+numrounds = 2
+stack = 100 100
+blind = 1 2
+END GAMEDEF"""
+        
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Game should have 2 rounds
+        assert env._num_rounds == 2, f"Expected 2 rounds, got {env._num_rounds}"
+        
+        # Play through preflop
+        state = env.step(state, universal_poker.CALL)  # Player calls
+        state = env.step(state, universal_poker.CALL)  # Player checks, advance to flop
+        assert state.round == 1, "Should be on flop"
+        
+        # Play through flop - should terminate after this
+        state = env.step(state, universal_poker.CALL)  # Player checks
+        state = env.step(state, universal_poker.CALL)  # Player checks, should terminate
+        
+        # Game should terminate after flop (round 1) since numrounds=2
+        assert state.terminated, "Game should terminate after 2 rounds"
+
+    def test_numrounds_default_four_rounds(self):
+        """Test that default behavior is still 4 rounds when numRounds not specified."""
+        config_str = """GAMEDEF
+numplayers = 2
+stack = 100 100
+blind = 1 2
+END GAMEDEF"""
+        
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Default should be 4 rounds
+        assert env._num_rounds == 4, f"Expected default 4 rounds, got {env._num_rounds}"
+        
+        # Game should not terminate until after river (round 3)
+        # Play through preflop
+        state = env.step(state, universal_poker.CALL)
+        state = env.step(state, universal_poker.CALL)
+        assert state.round == 1 and not state.terminated, "Should be on flop and not terminated"
+        
+        # Play through flop
+        state = env.step(state, universal_poker.CALL)
+        state = env.step(state, universal_poker.CALL)
+        assert state.round == 2 and not state.terminated, "Should be on turn and not terminated"
+        
+        # Play through turn
+        state = env.step(state, universal_poker.CALL)
+        state = env.step(state, universal_poker.CALL)
+        assert state.round == 3 and not state.terminated, "Should be on river and not terminated"
+        
+        # Play through river - now should terminate
+        state = env.step(state, universal_poker.CALL)
+        state = env.step(state, universal_poker.CALL)
+        assert state.terminated, "Game should terminate after 4 rounds"
+
+    def test_numrounds_one_round(self):
+        """Test config string with numRounds = 1 (preflop only)."""
+        config_str = """GAMEDEF
+numplayers = 2
+numrounds = 1
+stack = 100 100
+blind = 1 2
+END GAMEDEF"""
+        
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Game should have 1 round
+        assert env._num_rounds == 1, f"Expected 1 round, got {env._num_rounds}"
+        
+        # Game should terminate immediately after preflop
+        state = env.step(state, universal_poker.CALL)  # Player calls
+        state = env.step(state, universal_poker.CALL)  # Player checks, should terminate
+        
+        # Game should terminate after preflop (round 0) since numrounds=1
+        assert state.terminated, "Game should terminate after 1 round"
+        assert state.round >= 1, "Round should have advanced to termination"
+
 
 if __name__ == "__main__":
     # Run basic tests
@@ -934,6 +1056,18 @@ if __name__ == "__main__":
         
         test_suite.test_config_all_in_scenario()
         print("✓ Config all-in scenario test passed")
+        
+        test_suite.test_numrounds_three_rounds()
+        print("✓ NumRounds three rounds test passed")
+        
+        test_suite.test_numrounds_two_rounds()
+        print("✓ NumRounds two rounds test passed")
+        
+        test_suite.test_numrounds_default_four_rounds()
+        print("✓ NumRounds default four rounds test passed")
+        
+        test_suite.test_numrounds_one_round()
+        print("✓ NumRounds one round test passed")
         
         print("\nAll tests passed! ✅")
         
