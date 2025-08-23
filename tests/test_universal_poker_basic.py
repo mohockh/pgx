@@ -964,113 +964,30 @@ END GAMEDEF"""
 
 
 if __name__ == "__main__":
-    # Run basic tests
+    import sys
+    import traceback
+    
     test_suite = TestUniversalPoker()
     
-    print("Running Universal Poker tests...")
+    print("Running Universal Poker basic tests...")
     
-    try:
-        test_suite.test_init_basic()
-        print("✓ Basic initialization test passed")
-        
-        test_suite.test_init_custom_params()
-        print("✓ Custom parameters test passed")
-        
-        test_suite.test_hole_cards_dealt()
-        print("✓ Hole cards dealing test passed")
-        
-        test_suite.test_legal_actions_preflop()
-        print("✓ Legal actions test passed")
-        
-        test_suite.test_fold_action()
-        print("✓ Fold action test passed")
-        
-        test_suite.test_call_action()
-        print("✓ Call action test passed")
-        
-        test_suite.test_raise_action()
-        print("✓ Raise action test passed")
-        
-        test_suite.test_observation_shape()
-        print("✓ Observation shape test passed")
-        
-        test_suite.test_rewards_on_termination()
-        print("✓ Rewards on termination test passed")
-        
-        test_suite.test_multiple_players()
-        print("✓ Multiple players test passed")
-        
-        test_suite.test_game_properties()
-        print("✓ Game properties test passed")
-        
-        test_suite.test_jax_compilation()
-        print("✓ JAX compilation test passed")
-        
-        test_suite.test_deterministic_behavior()
-        print("✓ Deterministic behavior test passed")
-        
-        test_suite.test_random_games()
-        print("✓ Random games test passed")
-        
-        test_suite.test_lazy_evaluation_early_fold()
-        print("✓ Lazy evaluation early fold test passed")
-        
-        test_suite.test_lazy_evaluation_pre_showdown()
-        print("✓ Lazy evaluation pre-showdown test passed")
-        
-        test_suite.test_lazy_evaluation_showdown()
-        print("✓ Lazy evaluation showdown test passed")
-        
-        test_suite.test_lazy_evaluation_jax_compilation()
-        print("✓ Lazy evaluation JAX compilation test passed")
-        
-        test_suite.test_side_pot_distribution()
-        print("✓ Side pot distribution test passed")
-        
-        test_suite.test_config_string_basic()
-        print("✓ Config string basic test passed")
-        
-        test_suite.test_config_string_four_players()
-        print("✓ Config string four players test passed")
-        
-        test_suite.test_config_string_different_stacks()
-        print("✓ Config string different stacks test passed")
-        
-        test_suite.test_config_string_ante_structure()
-        print("✓ Config string ante structure test passed")
-        
-        test_suite.test_config_string_backwards_compatibility()
-        print("✓ Config string backwards compatibility test passed")
-        
-        test_suite.test_config_string_partial_override()
-        print("✓ Config string partial override test passed")
-        
-        test_suite.test_config_observation_vectors()
-        print("✓ Config observation vectors test passed")
-        
-        test_suite.test_config_step_actions()
-        print("✓ Config step actions test passed")
-        
-        test_suite.test_config_multi_round_progression()
-        print("✓ Config multi-round progression test passed")
-        
-        test_suite.test_config_all_in_scenario()
-        print("✓ Config all-in scenario test passed")
-        
-        test_suite.test_numrounds_three_rounds()
-        print("✓ NumRounds three rounds test passed")
-        
-        test_suite.test_numrounds_two_rounds()
-        print("✓ NumRounds two rounds test passed")
-        
-        test_suite.test_numrounds_default_four_rounds()
-        print("✓ NumRounds default four rounds test passed")
-        
-        test_suite.test_numrounds_one_round()
-        print("✓ NumRounds one round test passed")
-        
-        print("\nAll tests passed! ✅")
-        
-    except Exception as e:
-        print(f"❌ Test failed: {e}")
-        raise
+    # Get all test methods
+    test_methods = [method for method in dir(test_suite) if method.startswith('test_')]
+    
+    passed = 0
+    failed = 0
+    
+    for method_name in test_methods:
+        try:
+            method = getattr(test_suite, method_name)
+            method()
+            print(f"✓ {method_name} passed")
+            passed += 1
+        except Exception as e:
+            print(f"❌ {method_name} failed: {e}")
+            traceback.print_exc()
+            failed += 1
+    
+    print(f"\nResults: {passed} passed, {failed} failed")
+    if failed > 0:
+        sys.exit(1)
