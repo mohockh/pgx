@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import pgx.core as core
 from pgx._src.struct import dataclass
 from pgx._src.types import Array, PRNGKey
-from .poker_eval.jax_evaluator_new import evaluate_hand
+from .poker_eval.evaluator import evaluate_hand
 from .poker_eval.cardset import cards_to_cardset, cardset_to_cards, add_card_to_cardset, create_empty_cardset, cardset_or, cardset_and, cardset_not
 
 FALSE = jnp.bool_(False)

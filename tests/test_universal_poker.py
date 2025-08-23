@@ -484,7 +484,7 @@ END GAMEDEF"""
         board_cardset = cards_to_cardset(jnp.array(board_cards))
         
         # Pre-compute hand scores for these specific hands
-        from pgx.poker_eval.jax_evaluator_new import evaluate_hand
+        from pgx.poker_eval.evaluator import evaluate_hand
         from pgx.poker_eval.cardset import cardset_or
         
         board_cardsets_tiled = jnp.tile(board_cardset[None, :], (4, 1))
