@@ -207,8 +207,8 @@ class UniversalPoker(core.Env):
         # Calculate stacks after posting blinds (don't modify self.stack_sizes)
         stacks_after_blinds = jnp.array(self.stack_sizes, dtype=jnp.int32) - bets
         
-        pot = jnp.int32(jnp.sum(bets))
-        max_bet = jnp.int32(jnp.max(bets))
+        pot = jnp.sum(bets)
+        max_bet = jnp.max(bets)
         
         # Deal hole cards using vectorized approach - deal to all num_players positions
         rng, subkey = jax.random.split(rng)
@@ -245,7 +245,7 @@ class UniversalPoker(core.Env):
         active_mask = player_mask.copy()  # Initially all players are active (not folded/all-in)
         
         # Determine first player to act from first_player_array (round 0 = preflop)
-        current_player = jnp.int32(self.first_player_array[0])
+        current_player = self.first_player_array[0]
         
         state = State(
             num_players=self._num_players,
@@ -259,7 +259,7 @@ class UniversalPoker(core.Env):
             board_cardset=board_cardset,
             visible_board_cardsets=visible_board_cardsets,
             hand_final_scores=hand_final_scores,
-            current_player=jnp.int32(current_player),
+            current_player=current_player,
             player_mask=player_mask,
             active_mask=active_mask,
             rewards=jnp.zeros(2, dtype=jnp.float32),  # Fixed size for compatibility
@@ -277,7 +277,6 @@ class UniversalPoker(core.Env):
         """Execute one step of the game."""
         del key
         assert isinstance(state, State)
-        action = jnp.int32(action)
         current_player = state.current_player
         
         # Apply action
@@ -360,26 +359,26 @@ class UniversalPoker(core.Env):
         is_raise = action == RAISE
         
         # Calculate amounts for call/raise actions (ensure int32 types)
-        call_amount = jnp.int32(state.max_bet - state.bets[current_player])
+        call_amount = state.max_bet - state.bets[current_player]
         actual_call = jnp.minimum(call_amount, state.stacks[current_player])
         
         # Use the maximum blind amount as the minimum bet when max_bet is 0
         min_blind = jnp.max(state.bets)  # Get the largest blind that was posted
-        min_raise = jnp.where(state.max_bet == 0, min_blind, jnp.int32(state.max_bet * 2))
-        raise_amount = jnp.int32(min_raise - state.bets[current_player])
+        min_raise = jnp.where(state.max_bet == 0, min_blind, state.max_bet * 2)
+        raise_amount = min_raise - state.bets[current_player]
         actual_raise = jnp.minimum(raise_amount, state.stacks[current_player])
         
         # Determine final amounts based on action
-        chips_to_add = jnp.where(is_call, actual_call, jnp.where(is_raise, actual_raise, jnp.int32(0)))
+        chips_to_add = jnp.where(is_call, actual_call, jnp.where(is_raise, actual_raise, 0))
         
         # Update state arrays (ensure int32 types)
         new_folded = state.folded.at[current_player].set(state.folded[current_player] | is_fold)
         new_bets = state.bets.at[current_player].add(chips_to_add)
         new_stacks = state.stacks.at[current_player].subtract(chips_to_add)
-        new_pot = jnp.int32(state.pot + chips_to_add)
+        new_pot = state.pot + chips_to_add
         new_max_bet = jnp.where(is_raise, jnp.maximum(state.max_bet, new_bets[current_player]), state.max_bet)
         new_all_in = state.all_in.at[current_player].set(new_stacks[current_player] == 0)
-        new_last_raiser = jnp.where(is_raise, jnp.int32(current_player), state.last_raiser)
+        new_last_raiser = jnp.where(is_raise, current_player, state.last_raiser)
         
         return state.replace(
             folded=new_folded,
@@ -419,13 +418,13 @@ class UniversalPoker(core.Env):
 
     def _advance_round(self, state: State) -> State:
         """Advance to the next betting round."""
-        new_round = jnp.int32(state.round + 1)
+        new_round = state.round + 1
         
         # Reset betting for new round - use concrete shape
         bets = jnp.zeros(self._num_players, dtype=jnp.int32)
-        max_bet = jnp.int32(0)
-        num_actions_this_round = jnp.int32(0)
-        last_raiser = jnp.int32(-1)
+        max_bet = 0
+        num_actions_this_round = 0
+        last_raiser = -1
         
         # Determine first player for new round
         current_player = self._get_first_player_for_round(state, new_round)
@@ -441,34 +440,11 @@ class UniversalPoker(core.Env):
 
     def _next_player(self, state: State) -> State:
         """Move to the next player."""
-        next_player = self._get_next_active_player(state)
+        next_player = self._get_next_active_player_from(state, state.current_player)
         
         return state.replace(
             current_player=next_player
         )
-
-    def _get_next_active_player(self, state: State) -> int:
-        """Get the next active player (not folded or all-in)."""
-        current = state.current_player
-        
-        # Use pre-computed active mask
-        active_mask = state.active_mask
-        
-        # Create priority array: higher values for players that come after current player
-        # Calculate distance from current player in circular order
-        player_indices = jnp.arange(self._num_players)
-        distances = (player_indices - current - 1) % self._num_players
-        # Give highest priority to the closest player after current (lowest distance)
-        # Invert distance so closer players get higher priority
-        priorities = self._num_players - distances
-        
-        # Set inactive players to have very low priority
-        priorities = jnp.where(active_mask, priorities, -1)
-        
-        # Find player with highest priority (closest active player after current)
-        next_player = jnp.int32(jnp.argmax(priorities))
-        
-        return next_player
 
     def _get_first_player_for_round(self, state: State, round: int) -> int:
         """Get the first player to act in a given round."""
@@ -482,14 +458,14 @@ class UniversalPoker(core.Env):
         active_mask = state.active_mask
         
         # Create priority array: higher values for players that come after start_pos
-        distances = (jnp.arange(self._num_players) - start_pos) % self._num_players
+        distances = (jnp.arange(self._num_players) - start_pos - 1) % self._num_players
         priorities = self._num_players - distances
         
         # Set inactive players to have very low priority
         priorities = jnp.where(active_mask, priorities, -1)
         
         # Find player with highest priority (closest active player from start_pos)
-        next_player = jnp.int32(jnp.argmax(priorities))
+        next_player = jnp.argmax(priorities)
         
         return next_player
 
@@ -520,7 +496,7 @@ class UniversalPoker(core.Env):
         is_showdown = (~is_single_winner) & reached_showdown
         
         def single_winner_case():
-            single_winner_idx = jnp.int32(jnp.argmax(active_mask))
+            single_winner_idx = jnp.argmax(active_mask)
             rewards = jnp.zeros(self._num_players, dtype=jnp.float32)
             return rewards.at[single_winner_idx].set(state.pot)
         

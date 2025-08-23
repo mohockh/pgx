@@ -17,7 +17,7 @@ class TestPlayerNavigation:
         assert jnp.sum(state.active_mask) == 3, "All 3 players should be active initially"
         
         current_player = state.current_player
-        next_player = env._get_next_active_player(state)
+        next_player = env._get_next_active_player_from(state, state.current_player)
         
         # Next player should be different from current
         assert next_player != current_player, "Next player should be different from current"
@@ -37,12 +37,12 @@ class TestPlayerNavigation:
         
         # Test from player 3 (should wrap to player 0)
         state = state.replace(current_player=3)
-        next_player = env._get_next_active_player(state)
+        next_player = env._get_next_active_player_from(state, state.current_player)
         assert next_player == 0, f"From player 3, next should be 0, got {next_player}"
         
         # Test from player 2 (should go to player 3)
         state = state.replace(current_player=2)
-        next_player = env._get_next_active_player(state)
+        next_player = env._get_next_active_player_from(state, state.current_player)
         assert next_player == 3, f"From player 2, next should be 3, got {next_player}"
         
     def test_get_next_active_player_with_folded(self):
@@ -58,12 +58,12 @@ class TestPlayerNavigation:
         
         # From player 0, should skip to player 3
         state = state.replace(current_player=0)
-        next_player = env._get_next_active_player(state)
+        next_player = env._get_next_active_player_from(state, state.current_player)
         assert next_player == 3, f"Should skip folded players 1,2 and go to 3, got {next_player}"
         
         # From player 3, should wrap to player 0
         state = state.replace(current_player=3)
-        next_player = env._get_next_active_player(state)
+        next_player = env._get_next_active_player_from(state, state.current_player)
         assert next_player == 0, f"Should wrap from 3 to 0, got {next_player}"
         
     def test_get_next_active_player_with_all_in(self):
@@ -79,7 +79,7 @@ class TestPlayerNavigation:
         
         # From player 0, should skip to player 3
         state = state.replace(current_player=0)
-        next_player = env._get_next_active_player(state)
+        next_player = env._get_next_active_player_from(state, state.current_player)
         assert next_player == 3, f"Should skip all-in players 1,2 and go to 3, got {next_player}"
         
         # Verify all-in players are not considered active
@@ -97,7 +97,7 @@ class TestPlayerNavigation:
         active_mask = (~folded) & (~state.all_in) & state.player_mask
         state = state.replace(folded=folded, active_mask=active_mask, current_player=1)
         
-        next_player = env._get_next_active_player(state)
+        next_player = env._get_next_active_player_from(state, state.current_player)
         # With only one active player, should return that same player
         assert next_player == 1, f"With only player 1 active, should return 1, got {next_player}"
         
@@ -127,7 +127,7 @@ class TestPlayerNavigation:
         
         # Test from position 1 with all players active
         next_player = env._get_next_active_player_from(state, 1)
-        assert next_player == 1, f"From position 1 with all active, should return 1, got {next_player}"
+        assert next_player == 2, f"From position 1 with all active, should return 2, got {next_player}"
         
         # Test with player 1 folded
         folded = jnp.array([False, True, False, False])
@@ -138,20 +138,27 @@ class TestPlayerNavigation:
         next_player = env._get_next_active_player_from(state, 1)
         assert next_player == 2, f"From position 1 with player 1 folded, should return 2, got {next_player}"
         
-        # Test wrapping - from position 3, with player 3 still active, should return 3
-        # (since _get_next_active_player_from finds first active player starting from position, including the position itself)
-        next_player = env._get_next_active_player_from(state, 3)
-        assert next_player == 3, f"From position 3 with player 3 active, should return 3, got {next_player}"
+        # Test with player 2 folded
+        folded = jnp.array([False, False, True, False])
+        active_mask = (~folded) & (~state.all_in) & state.player_mask
+        state = state.replace(folded=folded, active_mask=active_mask)
         
-        # Test actual wrapping - if we want to test wrapping to 0, we need to start from position 4 (out of bounds)
-        # But since positions must be valid, let's test with player 3 also folded
-        folded_more = jnp.array([False, True, False, True])  # Players 1 and 3 folded, only 0 and 2 active
+        # From position 1, should find next active player (3)
+        next_player = env._get_next_active_player_from(state, 1)
+        assert next_player == 3, f"From position 1 with player 2 folded, should return 3, got {next_player}"
+        
+        # Test wrapping - from position 3, with player 3 still active, should return 0
+        next_player = env._get_next_active_player_from(state, 3)
+        assert next_player == 0, f"From position 3 with player 0 active, should return 0, got {next_player}"
+        
+        # Test wrapping with folded players - if we want to test wrapping to 0, we need to start from position 3
+        folded_more = jnp.array([True, True, False, False])  # Players 0 and 1 folded, only 2 and 3 active
         active_mask_more = (~folded_more) & (~state.all_in) & state.player_mask
         state_more = state.replace(folded=folded_more, active_mask=active_mask_more)
         
-        # Now from position 3, should wrap to 0 (since 3 is folded)
+        # Now from position 3, should wrap to 0 and advance to 2 (since 0 and 1 are folded)
         next_player = env._get_next_active_player_from(state_more, 3)
-        assert next_player == 0, f"From position 3 with player 3 folded, should wrap to 0, got {next_player}"
+        assert next_player == 2, f"From position 3 with players 1 and 2 folded, should wrap to 2, got {next_player}"
         
     def test_next_player_method(self):
         """Test the _next_player method that updates state."""
@@ -185,7 +192,7 @@ class TestPlayerNavigation:
         state = state.replace(folded=folded, active_mask=active_mask)
         
         # Even with no active players, should return a valid index
-        next_player = env._get_next_active_player(state)
+        next_player = env._get_next_active_player_from(state, state.current_player)
         assert 0 <= next_player < 2, "Should return valid player index even with no active players"
         
         # Test with all players all-in
@@ -194,7 +201,7 @@ class TestPlayerNavigation:
         state = env.init(key)  # Reset
         state = state.replace(all_in=all_in, active_mask=active_mask)
         
-        next_player = env._get_next_active_player(state)
+        next_player = env._get_next_active_player_from(state, state.current_player)
         assert 0 <= next_player < 2, "Should return valid player index even with all players all-in"
         
     def test_navigation_consistency(self):
@@ -212,7 +219,7 @@ class TestPlayerNavigation:
         for current in range(4):
             state = state.replace(current_player=current)
             
-            next_from_current = env._get_next_active_player(state)
+            next_from_current = env._get_next_active_player_from(state, state.current_player)
             next_from_position = env._get_next_active_player_from(state, (current + 1) % 4)
             
             # Both methods should find an active player
@@ -265,18 +272,18 @@ class TestPlayerNavigation:
         active_players = [0, 3, 5]
         for i, current_player in enumerate(active_players):
             state = state.replace(current_player=current_player)
-            next_player = env._get_next_active_player(state)
+            next_player = env._get_next_active_player_from(state, state.current_player)
             expected_next = active_players[(i + 1) % len(active_players)]
             assert next_player == expected_next, f"From player {current_player}, expected {expected_next}, got {next_player}"
             
         # Test _get_next_active_player_from with various starting positions
         test_cases = [
-            (0, 0),  # From 0, first active is 0
+            (0, 3),  # From 0, first active is 3
             (1, 3),  # From 1, first active is 3  
             (2, 3),  # From 2, first active is 3
-            (3, 3),  # From 3, first active is 3
+            (3, 5),  # From 3, first active is 5
             (4, 5),  # From 4, first active is 5
-            (5, 5),  # From 5, first active is 5
+            (5, 0),  # From 5, first active is 0
         ]
         
         for start_pos, expected in test_cases:
