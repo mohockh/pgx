@@ -143,7 +143,7 @@ numplayers = 2
 stack = 10 10
 blind = 1 2
 END GAMEDEF"""
-        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)  # Small stacks
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)  # Small stacks
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -161,7 +161,7 @@ END GAMEDEF"""
                 state = env.step(state, universal_poker.FOLD)
         
         # Check if any player went all-in
-        assert jnp.any(state.all_in[:state.num_players]) or state.terminated
+        assert jnp.any(state.all_in) or state.terminated
         
     def test_observation_shape(self):
         """Test observation shape and content."""
@@ -310,7 +310,7 @@ numplayers = 2
 stack = 5 5
 blind = 1 2
 END GAMEDEF"""
-        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
         
@@ -427,7 +427,7 @@ numplayers = 2
 stack = 3 3
 blind = 1 2
 END GAMEDEF"""
-        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
         state = env.init(key)
         assert state.stacks[0] == 2  # Almost all-in from start
         assert state.stacks[1] == 1  # Almost all-in from start
@@ -872,7 +872,7 @@ END GAMEDEF"""
         
         # Game should terminate after turn (round 2) since numrounds=3
         assert state.terminated, "Game should terminate after 3 rounds"
-        assert state.round >= 3, "Game should have reached final round"
+        assert state.round == 2, "Game should have reached final round"
 
     def test_numrounds_two_rounds(self):
         """Test config string with numRounds = 2 (preflop and flop only)."""
@@ -960,7 +960,7 @@ END GAMEDEF"""
         
         # Game should terminate after preflop (round 0) since numrounds=1
         assert state.terminated, "Game should terminate after 1 round"
-        assert state.round >= 1, "Round should have advanced to termination"
+        assert state.round == 0, "Round should have advanced to termination, without incrementing round"
 
 
 if __name__ == "__main__":

@@ -184,10 +184,10 @@ END GAMEDEF"""
         
         legal_actions = env._get_legal_actions(state)
         
-        # All actions should be False when game is terminated
-        assert legal_actions[universal_poker.FOLD] == False, "Should not be able to fold in terminated game"
-        assert legal_actions[universal_poker.CALL] == False, "Should not be able to call in terminated game"
-        assert legal_actions[universal_poker.RAISE] == False, "Should not be able to raise in terminated game"
+        # All actions should be True when game is terminated per pgx step().
+        assert legal_actions[universal_poker.FOLD] == True, "Should be able to fold in terminated game"
+        assert legal_actions[universal_poker.CALL] == True, "Should be able to call in terminated game"
+        assert legal_actions[universal_poker.RAISE] == True, "Should be able to raise in terminated game"
     
     def test_legal_actions_edge_case_bet_equals_max_bet(self):
         """Test legal actions when player's current bet equals max_bet."""

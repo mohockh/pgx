@@ -66,8 +66,9 @@ class State(core.State):
     hand_final_scores: Array = None  # Final hand strength for each player.
     
     # Betting info
-    first_player: Array = jnp.array([1, 0, 0, 0], dtype=jnp.int32)  # first to act each round
+    first_player: Array = jnp.array([3, 1, 1, 1], dtype=jnp.int32)  # first to act each round
     max_bet: Array = jnp.int32(0)
+    min_raise: Array = jnp.int32(0)  # Minimum raise amount
     
     # Action tracking
     num_actions_this_round: Array = jnp.int32(0)
@@ -210,6 +211,10 @@ class UniversalPoker(core.Env):
         pot = jnp.sum(bets)
         max_bet = jnp.max(bets)
         
+        # Initialize min_raise to big blind amount
+        big_blind = jnp.max(self.blind_amounts)
+        min_raise = big_blind
+        
         # Deal hole cards using vectorized approach - deal to all num_players positions
         rng, subkey = jax.random.split(rng)
         deck = jax.random.permutation(subkey, jnp.arange(52))
@@ -255,6 +260,7 @@ class UniversalPoker(core.Env):
             all_in=jnp.zeros(self._num_players, dtype=jnp.bool_),
             pot=pot,
             max_bet=max_bet,
+            min_raise=min_raise,
             hole_cardsets=hole_cardsets,
             board_cardset=board_cardset,
             visible_board_cardsets=visible_board_cardsets,
@@ -262,8 +268,8 @@ class UniversalPoker(core.Env):
             current_player=current_player,
             player_mask=player_mask,
             active_mask=active_mask,
-            rewards=jnp.zeros(2, dtype=jnp.float32),  # Fixed size for compatibility
-            terminated=False,
+            rewards=jnp.zeros(self._num_players, dtype=jnp.float32),  # Size matches num_players
+            terminated=jnp.bool_(False),
         )
         
         # Set legal actions
@@ -282,45 +288,48 @@ class UniversalPoker(core.Env):
         # Apply action
         new_state = self._apply_action(state, action)
         
-        # Check if betting round is over
-        betting_round_over = self._is_betting_round_over(new_state)
-        
-        # If betting round is over, advance to next round or end game
-        new_state = jax.lax.cond(
-            betting_round_over,
-            lambda s: self._advance_round(s),
-            lambda s: self._next_player(s),
-            new_state
-        )
-        
-        # Check if game is terminated (using pre-computed masks)
+        # Check if game is terminated BEFORE advancing round/player (using pre-computed masks)
         num_active = jnp.sum(new_state.active_mask)
-        terminated = (num_active <= 1) | (new_state.round >= self._num_rounds)
+        betting_round_over = self._is_betting_round_over(new_state)
+        in_last_betting_round = new_state.round == (self._num_rounds - 1)
+        terminated = (num_active <= 1) | (betting_round_over & in_last_betting_round)
         
-        # Calculate rewards and legal actions in single conditional (Phase 1.1: Merge termination checks)
-        def terminated_updates():
+        # Combined function for terminated case: don't advance, calculate final rewards and legal actions
+        def terminated_branch():
             final_rewards = self._calculate_rewards(new_state)
-            final_legal_actions = jnp.zeros(3, dtype=jnp.bool_)
-            return final_rewards, final_legal_actions
+            final_legal_actions = jnp.ones(3, dtype=jnp.bool_)
+            return new_state.replace(
+                rewards=final_rewards,
+                legal_action_mask=final_legal_actions
+            )
         
-        def active_updates():
-            active_rewards = new_state.rewards
-            active_legal_actions = self._get_legal_actions(new_state)
-            return active_rewards, active_legal_actions
+        # Combined function for active case: advance game, keep current rewards and legal actions
+        def active_branch():
+            # Advance to next round or next player
+            advanced_state = jax.lax.cond(
+                betting_round_over,
+                lambda s: self._advance_round(s),
+                lambda s: self._next_player(s),
+                new_state
+            )
+            
+            # Since we already checked termination and we're in active branch, 
+            # game continues - calculate legal actions for advanced state
+            legal_actions = self._get_legal_actions(advanced_state)
+            
+            return advanced_state.replace(
+                rewards=advanced_state.rewards,
+                legal_action_mask=legal_actions
+            )
         
-        rewards, legal_action_mask = jax.lax.cond(
-            terminated,
-            terminated_updates,
-            active_updates
-        )
-        
-        new_state = new_state.replace(
-            terminated=terminated,
-            rewards=rewards,
-            legal_action_mask=legal_action_mask
-        )
+        new_state = new_state.replace(terminated=terminated)
 
-        return new_state
+        # Execute the appropriate branch based on initial termination status
+        return jax.lax.cond(
+            terminated,
+            terminated_branch,
+            active_branch
+        )
     
     def _observe(self, state: core.State, player_id: Array) -> Array:
         """Generate observation for a specific player."""
@@ -362,9 +371,8 @@ class UniversalPoker(core.Env):
         call_amount = state.max_bet - state.bets[current_player]
         actual_call = jnp.minimum(call_amount, state.stacks[current_player])
         
-        # Use the maximum blind amount as the minimum bet when max_bet is 0
-        min_blind = jnp.max(state.bets)  # Get the largest blind that was posted
-        min_raise = jnp.where(state.max_bet == 0, min_blind, state.max_bet * 2)
+        # Use stored min_raise amount
+        min_raise = state.max_bet + state.min_raise
         raise_amount = min_raise - state.bets[current_player]
         actual_raise = jnp.minimum(raise_amount, state.stacks[current_player])
         
@@ -380,12 +388,18 @@ class UniversalPoker(core.Env):
         new_all_in = state.all_in.at[current_player].set(new_stacks[current_player] == 0)
         new_last_raiser = jnp.where(is_raise, current_player, state.last_raiser)
         
+        # Update min_raise - calculate raise increment from previous player's bet
+        bet_before = state.bets[(current_player - 1) % state.num_players]  # Get previous player's bet amount
+        raise_increment = new_bets[current_player] - bet_before  # This bet raised last player by raise_increment
+        new_min_raise = jnp.maximum(state.min_raise, raise_increment)
+        
         return state.replace(
             folded=new_folded,
             bets=new_bets,
             stacks=new_stacks,
             pot=new_pot,
             max_bet=new_max_bet,
+            min_raise=new_min_raise,
             all_in=new_all_in,
             last_raiser=new_last_raiser,
             active_mask=(~new_folded & ~new_all_in & state.player_mask),
@@ -425,6 +439,9 @@ class UniversalPoker(core.Env):
         max_bet = 0
         num_actions_this_round = 0
         last_raiser = -1
+        # Reset min_raise to big blind for new round
+        big_blind = jnp.max(self.blind_amounts)
+        min_raise = big_blind
         
         # Determine first player for new round
         current_player = self._get_first_player_for_round(state, new_round)
@@ -433,6 +450,7 @@ class UniversalPoker(core.Env):
             round=new_round,
             bets=bets,
             max_bet=max_bet,
+            min_raise=min_raise,
             current_player=current_player,
             num_actions_this_round=num_actions_this_round,
             last_raiser=last_raiser
@@ -440,7 +458,7 @@ class UniversalPoker(core.Env):
 
     def _next_player(self, state: State) -> State:
         """Move to the next player."""
-        next_player = self._get_next_active_player_from(state, state.current_player)
+        next_player = self._get_next_active_player_from(state, state.current_player + 1)
         
         return state.replace(
             current_player=next_player
@@ -448,17 +466,21 @@ class UniversalPoker(core.Env):
 
     def _get_first_player_for_round(self, state: State, round: int) -> int:
         """Get the first player to act in a given round."""
-        # Use the configured first player for this round
+        # Start searching for the first eligible player from first spot in
+        # configured array first_player_array.
         start_pos = self.first_player_array[round]
         return self._get_next_active_player_from(state, start_pos)
 
     def _get_next_active_player_from(self, state: State, start_pos: int) -> int:
         """Get next active player starting from a position."""
+        # Make sure start_pos wraps around the table given self._num_players.
+        start_pos = start_pos % self._num_players
+
         # Use pre-computed active mask
         active_mask = state.active_mask
         
         # Create priority array: higher values for players that come after start_pos
-        distances = (jnp.arange(self._num_players) - start_pos - 1) % self._num_players
+        distances = (jnp.arange(self._num_players) - start_pos) % self._num_players
         priorities = self._num_players - distances
         
         # Set inactive players to have very low priority
@@ -474,15 +496,15 @@ class UniversalPoker(core.Env):
         current_player = state.current_player
         
         # Calculate legal actions regardless of termination state
-        can_fold = ~state.all_in[current_player]
-        can_call = (state.bets[current_player] <= state.max_bet) & (state.stacks[current_player] > 0)
-        total_chips = state.stacks[current_player] + state.bets[current_player]
-        can_raise = total_chips > state.max_bet
+        can_fold = ~(state.all_in | state.folded)
+        can_call = (state.bets <= state.max_bet) & (state.stacks > 0) & ~state.folded
+        total_chips = state.stacks + state.bets
+        can_raise = (total_chips > state.max_bet) & ~state.folded
         
-        active_actions = jnp.array([can_fold, can_call, can_raise], dtype=jnp.bool_)
+        active_actions = jnp.column_stack([can_fold, can_call, can_raise])
         
-        # If terminated, return all False; otherwise return computed actions
-        return jnp.where(state.terminated, False, active_actions)
+        # Return computed actions for current_player only
+        return active_actions[current_player]
 
     def _calculate_rewards(self, state: State) -> Array:
         """Calculate final rewards for all players with proper side pot distribution."""
@@ -566,8 +588,8 @@ class UniversalPoker(core.Env):
             )
         )
         
-        # Return the appropriate slice for backward compatibility with existing reward array size
-        return final_rewards[:state.rewards.shape[0]]
+        # Return rewards for all players - now properly sized
+        return final_rewards
     
     @property
     def id(self) -> core.EnvId:
