@@ -202,18 +202,66 @@ class UniversalPoker(core.Env):
     def _init(self, rng: PRNGKey) -> State:
         """Initialize a new poker hand."""
         
-        # Post blinds using blind_amounts array (already num_players sized)
-        bets = jnp.array(self.blind_amounts, dtype=jnp.int32)
+        # Determine big blind amount for minimum participation check
+        big_blind = jnp.max(self.blind_amounts)
         
-        # Calculate stacks after posting blinds (don't modify self.stack_sizes)
-        stacks_after_blinds = jnp.array(self.stack_sizes, dtype=jnp.int32) - bets
+        # Identify players who have enough chips to meaningfully participate
+        initial_stacks = jnp.array(self.stack_sizes, dtype=jnp.int32)
+        sufficient_chips_mask = initial_stacks >= big_blind
+        
+        # Get indices of eligible players using vectorized operations
+        eligible_player_indices = jnp.where(sufficient_chips_mask, 
+                                          size=self._num_players, 
+                                          fill_value=-1)[0]
+        
+        # Count active players
+        num_active_players = jnp.sum(sufficient_chips_mask)
+        should_terminate = num_active_players < 2
+        
+        # Initialize betting arrays
+        bets = jnp.zeros(self._num_players, dtype=jnp.int32)
+        
+        # Assign blinds to eligible players using vectorized operations
+        # blind_amounts[0] goes to first eligible player, blind_amounts[1] to second, etc.
+        num_blinds = jnp.sum(self.blind_amounts > 0)
+        num_blinds_to_assign = jnp.minimum(num_blinds, num_active_players)
+        
+        # Use vectorized assignment for blind posting with JAX-compatible static indexing
+        # Convert boolean mask to integer for eligible players
+        is_eligible_int = sufficient_chips_mask.astype(jnp.int32)
+        
+        # Get the 1-based order of eligible players using cumsum
+        blind_order = jnp.cumsum(is_eligible_int)
+        
+        # Create 0-based indices for the blind_amounts array
+        # We use jnp.maximum to avoid a -1 index for ineligible players
+        blind_indices = jnp.maximum(0, blind_order - 1)
+        
+        # Gather the blinds according to the order, but cap at available blinds
+        # Only assign blinds to players within the number of available blind slots
+        should_get_blind = (blind_order > 0) & (blind_order <= num_blinds)
+        assigned_blind_amounts = jnp.where(should_get_blind,
+                                         jnp.take(self.blind_amounts, blind_indices, mode='clip'),
+                                         0)
+        
+        # Cap blind amounts at available stack for each player
+        actual_blind_amounts = jnp.minimum(assigned_blind_amounts, initial_stacks)
+        
+        # Use scatter to assign bets vectorized
+        bets = actual_blind_amounts
+        
+        # Calculate stacks after posting blinds (vectorized)
+        stacks_after_blinds = initial_stacks - bets
         
         pot = jnp.sum(bets)
         max_bet = jnp.max(bets)
-        
-        # Initialize min_raise to big blind amount
-        big_blind = jnp.max(self.blind_amounts)
         min_raise = big_blind
+        
+        # Auto-fold players with insufficient chips (vectorized)
+        folded = ~sufficient_chips_mask
+        
+        # Detect all-in players (those who used all their chips for blinds)
+        all_in = stacks_after_blinds == 0
         
         # Deal hole cards using vectorized approach - deal to all num_players positions
         rng, subkey = jax.random.split(rng)
@@ -247,17 +295,17 @@ class UniversalPoker(core.Env):
         
         # Initialize pre-computed masks for performance optimization
         player_mask = jnp.arange(self._num_players) < self._num_players
-        active_mask = player_mask.copy()  # Initially all players are active (not folded/all-in)
         
-        # Determine first player to act from first_player_array (round 0 = preflop)
-        current_player = self.first_player_array[0]
+        # Active mask excludes folded and all-in players for betting purposes
+        active_mask = ~folded & ~all_in
         
-        state = State(
+        # Create preliminary state to use helper functions for finding starting player
+        preliminary_state = State(
             num_players=self._num_players,
             stacks=stacks_after_blinds,
             bets=bets,
-            folded=jnp.zeros(self._num_players, dtype=jnp.bool_),
-            all_in=jnp.zeros(self._num_players, dtype=jnp.bool_),
+            folded=folded,
+            all_in=all_in,
             pot=pot,
             max_bet=max_bet,
             min_raise=min_raise,
@@ -265,14 +313,32 @@ class UniversalPoker(core.Env):
             board_cardset=board_cardset,
             visible_board_cardsets=visible_board_cardsets,
             hand_final_scores=hand_final_scores,
-            current_player=current_player,
+            current_player=0,  # Temporary, will be updated
             player_mask=player_mask,
             active_mask=active_mask,
-            rewards=jnp.zeros(self._num_players, dtype=jnp.float32),  # Size matches num_players
-            terminated=jnp.bool_(False),
+            rewards=jnp.zeros(self._num_players, dtype=jnp.float32),
+            terminated=should_terminate,
         )
         
-        # Set legal actions
+        # Find first valid player to act using vectorized helper function
+        # Start from the configured first player and find next active player
+        intended_first_player = self.first_player_array[0]
+        current_player = self._get_next_active_player_from(preliminary_state, intended_first_player)
+        
+        # If game should terminate, calculate rewards immediately (vectorized)
+        final_rewards = jax.lax.cond(
+            should_terminate,
+            lambda: self._calculate_rewards(preliminary_state),
+            lambda: jnp.zeros(self._num_players, dtype=jnp.float32)
+        )
+        
+        # Create final state
+        state = preliminary_state.replace(
+            current_player=current_player,
+            rewards=final_rewards
+        )
+        
+        # Set legal actions (will be empty if terminated)
         legal_action_mask = self._get_legal_actions(state)
         state = state.replace(legal_action_mask=legal_action_mask)
         
