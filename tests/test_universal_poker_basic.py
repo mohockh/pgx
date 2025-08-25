@@ -962,6 +962,307 @@ END GAMEDEF"""
         assert state.terminated, "Game should terminate after 1 round"
         assert state.round == 0, "Round should have advanced to termination, without incrementing round"
 
+    def test_betting_edge_case_insufficient_blind_posting(self):
+        """Test edge case where player has insufficient chips to post assigned blind."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 1 5 100
+blind = 2 3 0
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Player 0 has insufficient chips (1 < big_blind=3) and should be auto-folded
+        assert state.folded[0] == True, "Player 0 should be auto-folded for insufficient chips"
+        assert state.stacks[0] == 1, "Player 0 stack should be unchanged"
+        assert state.bets[0] == 0, "Player 0 should not have posted any blind"
+        
+        # Player 1 has sufficient chips and should get blind_amounts[0] = 2 (first eligible)
+        assert state.folded[1] == False, "Player 1 should not be folded"
+        assert state.stacks[1] == 3, "Player 1 should have 3 chips remaining (5-2)"
+        assert state.bets[1] == 2, "Player 1 should have posted first blind amount (2)"
+        
+        # Player 2 has sufficient chips and should get blind_amounts[1] = 3 (second eligible)
+        assert state.folded[2] == False, "Player 2 should not be folded" 
+        assert state.stacks[2] == 97, "Player 2 should have 97 chips remaining (100-3)"
+        assert state.bets[2] == 3, "Player 2 should have posted second blind amount (3)"
+
+    def test_betting_edge_case_multiple_all_ins_different_amounts(self):
+        """Test complex scenario with multiple all-ins at different amounts."""
+        config_str = """GAMEDEF
+numplayers = 4
+stack = 3 4 5 10
+blind = 1 2 0 0
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=4, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Initial state: P0=2 chips (3-1), P1=2 chips (4-2), P2=5 chips, P3=10 chips
+        # Max bet = 2 (big blind)
+        
+        # Player 2 (UTG) raises to 4 (min raise: 2 + 2)
+        state = env.step(state, universal_poker.RAISE)  # Player 2 raises to 4
+        assert state.max_bet == 4, f"Max bet should be 4, got {state.max_bet}"
+        
+        # Player 3 calls
+        state = env.step(state, universal_poker.CALL)  # Player 3 calls 4
+        
+        # Player 0 goes all-in with remaining 2 chips (3 total)
+        state = env.step(state, universal_poker.CALL)  # Player 0 all-in with 3 total
+        assert state.all_in[0] == True, "Player 0 should be all-in"
+        assert state.stacks[0] == 0, "Player 0 should have 0 chips left"
+        
+        # Player 1 goes all-in with remaining 2 chips (4 total)
+        state = env.step(state, universal_poker.CALL)  # Player 1 all-in with 4 total
+        assert state.all_in[1] == True, "Player 1 should be all-in"
+        assert state.stacks[1] == 0, "Player 1 should have 0 chips left"
+        
+        # Verify different all-in amounts created side pot scenario
+        all_in_players = jnp.sum(state.all_in[:4])
+        assert all_in_players >= 2, f"Should have at least 2 all-in players, got {all_in_players}"
+        
+        # Check final stack sizes (should all be 0 for all-in players)
+        assert state.stacks[0] == 0, "Player 0 should have 0 chips (went all-in with 3)"
+        assert state.stacks[1] == 0, "Player 1 should have 0 chips (went all-in with 4)"
+        
+        # Check pot reflects total contributions: 3+4+4+4 = 15 (P0's 3, P1's 4, P2's 4, P3's 4)
+        expected_pot = 3 + 4 + 4 + 4  # Total contributions from all players
+        assert state.pot == expected_pot, f"Pot should be {expected_pot}, got {state.pot}"
+        
+        # Test completed - this creates side pot structure: P0 contributed 3, others contributed 4 each
+
+    def test_betting_edge_case_fractional_all_in_raise(self):
+        """Test raise when player's all-in amount is less than minimum raise."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 15 6 100
+blind = 5 10 0
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Player 2 raises to 20
+        state = env.step(state, universal_poker.RAISE)  # Player 2 raises to 20
+        
+        # Player 0 wants to raise but only has 10 chips left (15-5 blind)
+        # Normal minimum raise would be to 40 (20 + 20), but player only has 15 total
+        # This should still be allowed as an all-in raise
+        state = env.step(state, universal_poker.RAISE)  # Player 0 attempts all-in raise
+        
+        assert state.all_in[0] == True, "Player 0 should be all-in"
+        assert state.stacks[0] == 0, "Player 0 should have 0 chips left"
+        assert state.bets[0] == 15, "Player 0 should have bet all chips (15)"
+        # The raise should be allowed even though it's less than full minimum raise amount
+
+    def test_betting_edge_case_dead_money_preservation(self):
+        """Test that folded players' contributions remain in pot."""
+        config_str = """GAMEDEF
+numplayers = 4
+stack = 100 100 100 100
+blind = 5 10 0 0
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=4, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Track initial pot
+        initial_pot = state.pot  # Should be 15 (5+10)
+        
+        # Players 2 and 3 call, then Player 2 raises
+        state = env.step(state, universal_poker.CALL)   # Player 2 calls 10
+        state = env.step(state, universal_poker.CALL)   # Player 3 calls 10
+        state = env.step(state, universal_poker.CALL)   # Player 0 calls to 10
+        state = env.step(state, universal_poker.RAISE)  # Player 1 raises to 20
+        
+        pot_after_raise = state.pot
+        
+        # Player 2 folds after contributing
+        state = env.step(state, universal_poker.FOLD)   # Player 2 folds
+        
+        # Pot should not decrease when player folds - their money stays as "dead money"
+        assert state.pot == pot_after_raise, "Pot should not decrease when player folds"
+        assert state.folded[2] == True, "Player 2 should be folded"
+
+    def test_betting_edge_case_string_betting_prevention(self):
+        """Test that players cannot 'string bet' (raise to amount less than minimum)."""
+        env = universal_poker.UniversalPoker()
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Initial max_bet is 2 (big blind)
+        # Normal raise should be to 4 (double)
+        current_player = state.current_player
+        state = env.step(state, universal_poker.RAISE)
+        
+        # Verify raise went to proper amount (not less)
+        assert state.max_bet == 4, f"Raise should go to 4, not less. Got {state.max_bet}"
+        assert state.bets[current_player] == 4, f"Player bet should be 4. Got {state.bets[current_player]}"
+
+    def test_betting_edge_case_exact_minimum_chips(self):
+        """Test scenarios where players have exactly the minimum required chips."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 4 8 100
+blind = 1 2 0
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Player 2 raises to 4 (doubling max_bet of 2)
+        state = env.step(state, universal_poker.RAISE)  # Player 2 raises to 4
+        
+        # Player 0 has exactly 3 chips left (4-1 blind), needs 3 more to call max_bet=4
+        # This should result in an all-in call
+        state = env.step(state, universal_poker.CALL)  # Player 0 calls all-in
+        assert state.all_in[0] == True, "Player 0 should be all-in with exact call amount"
+        assert state.stacks[0] == 0, "Player 0 should have 0 chips left"
+        
+        # Player 1 has exactly 6 chips left (8-2 blind), needs 2 more to call max_bet=4
+        # This should result in a normal call and advance to next round
+        state = env.step(state, universal_poker.CALL)  # Player 1 calls
+        assert state.all_in[1] == False, "Player 1 should not be all-in"
+        assert state.stacks[1] == 4, "Player 1 should have 4 chips left (6-2)"
+        # After all players call, betting round ends and bets reset for next round
+        assert state.round == 1, "Should advance to flop after all players call"
+        assert state.bets[1] == 0, "Bets should reset to 0 for new round"
+
+    def test_betting_edge_case_action_sequence_with_folds(self):
+        """Test complex action sequences with folds affecting betting order."""
+        env = universal_poker.UniversalPoker(num_players=4)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        initial_current_player = state.current_player
+        
+        # First player folds
+        state = env.step(state, universal_poker.FOLD)
+        assert state.folded[initial_current_player] == True, "First player should be folded"
+        
+        # Next player raises
+        pre_raise_player = state.current_player
+        state = env.step(state, universal_poker.RAISE)
+        assert state.last_raiser == pre_raise_player, "Raiser should be tracked correctly"
+        
+        # Third player calls
+        state = env.step(state, universal_poker.CALL)
+        
+        # Fourth player folds
+        state = env.step(state, universal_poker.FOLD)
+        
+        # Verify only 2 players remain active
+        active_players = jnp.sum(~state.folded[:state.num_players])
+        assert active_players == 2, f"Should have 2 active players, got {active_players}"
+
+    def test_betting_edge_case_minimum_raise_enforcement(self):
+        """Test that minimum raise amounts are properly enforced."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 100 100 100
+blind = 2 4 0
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Initial max_bet is 4 (big blind)
+        assert state.max_bet == 4, "Initial max_bet should be 4"
+        
+        # Player 2 raises - should go to 8 (4 + 4)
+        state = env.step(state, universal_poker.RAISE)  # Player 2 raises
+        assert state.max_bet == 8, f"After first raise, max_bet should be 8, got {state.max_bet}"
+        
+        # Player 0 re-raises - should go to 12 (8 + 4)
+        state = env.step(state, universal_poker.RAISE)  # Player 0 re-raises  
+        assert state.max_bet == 12, f"After second raise, max_bet should be 12, got {state.max_bet}"
+        
+        # Verify the raise increments are consistent (each raise adds 4)
+        assert state.bets[0] == 12, f"Player 0 total bet should be 12, got {state.bets[0]}"
+
+    def test_betting_edge_case_post_flop_betting_reset(self):
+        """Test that betting properly resets between rounds."""
+        env = universal_poker.UniversalPoker()
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Complete preflop with calls
+        preflop_pot = 0
+        state = env.step(state, universal_poker.CALL)  # Player calls
+        preflop_pot += (state.max_bet - 1)  # Call amount for small blind
+        state = env.step(state, universal_poker.CALL)  # Player checks
+        
+        total_preflop_pot = state.pot
+        
+        # Should advance to flop
+        assert state.round == 1, "Should be on flop"
+        assert state.max_bet == 0, "Max bet should reset to 0 on new round"
+        assert jnp.all(state.bets == 0), "All bets should reset to 0 on new round"
+        assert state.pot == total_preflop_pot, "Pot should carry over from preflop"
+        
+        # First bet on flop should establish new max_bet
+        state = env.step(state, universal_poker.RAISE)  # Player bets
+        flop_max_bet = state.max_bet
+        assert flop_max_bet > 0, "Max bet should be set by first flop bet"
+
+    def test_betting_edge_case_all_in_side_pot_creation(self):
+        """Test side pot creation with all-in players at different levels."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 5 15 50
+blind = 1 2 0
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Create scenario where all players go all-in with different amounts
+        # This tests the side pot logic
+        
+        # Player 2 raises big to 15
+        state = env.step(state, universal_poker.RAISE)  # Player 2 raises to 15
+        
+        # Player 0 goes all-in with 5 chips (4 remaining after blind)
+        state = env.step(state, universal_poker.CALL)  # Player 0 all-in
+        assert state.all_in[0] == True, "Player 0 should be all-in"
+        assert state.bets[0] == 5, "Player 0 should have bet all 5 chips"
+        
+        # Player 1 goes all-in with 15 chips (13 remaining after blind)  
+        state = env.step(state, universal_poker.CALL)  # Player 1 all-in
+        assert state.all_in[1] == True, "Player 1 should be all-in"
+        assert state.bets[1] == 15, "Player 1 should have bet all 15 chips"
+        
+        # All players should be all-in, creating complex side pot structure
+        assert jnp.all(state.all_in[:3]), "All players should be all-in"
+
+    def test_betting_edge_case_raise_after_multiple_calls(self):
+        """Test raising after multiple players have called."""
+        env = universal_poker.UniversalPoker(num_players=4)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+        
+        # Multiple players call
+        state = env.step(state, universal_poker.CALL)  # Player calls
+        state = env.step(state, universal_poker.CALL)  # Player calls  
+        state = env.step(state, universal_poker.CALL)  # Player calls
+        
+        # Last player raises
+        pre_raise_pot = state.pot
+        state = env.step(state, universal_poker.RAISE)  # Player raises
+        
+        # Verify raise affects all previous callers
+        assert state.max_bet > 2, "Max bet should increase after raise"
+        post_raise_pot = state.pot
+        assert post_raise_pot > pre_raise_pot, "Pot should increase from raise"
+        
+        # Now other players need to decide: fold, call the raise, or re-raise
+        legal_actions = state.legal_action_mask
+        assert legal_actions[universal_poker.FOLD] == True, "Should be able to fold"
+        assert legal_actions[universal_poker.CALL] == True, "Should be able to call raise"
+        assert legal_actions[universal_poker.RAISE] == True, "Should be able to re-raise"
+
 
 if __name__ == "__main__":
     import sys
