@@ -117,8 +117,8 @@ END GAMEDEF"""
         assert total_chips == state.max_bet, f"Total chips {total_chips} should equal max_bet {state.max_bet}"
         assert legal_actions[universal_poker.RAISE] == False, "Should not be able to raise with exact call amount"
     
-    def test_legal_actions_insufficient_chips_to_call(self):
-        """Test legal actions when player has insufficient chips to call."""
+    def test_legal_actions_insufficient_chips_to_call_big_blind(self):
+        """Test legal actions when player has insufficient chips to call the big blind."""
         config_str = """GAMEDEF
 numplayers = 2
 stack = 10 50
@@ -134,18 +134,13 @@ END GAMEDEF"""
         
         legal_actions = env._get_legal_actions(state)
         
-        # Should be able to fold
-        assert legal_actions[universal_poker.FOLD] == True, "Should be able to fold"
-        
-        # Should still be able to call (partial call/all-in)
-        has_chips = state.stacks[current_player] > 0
-        bet_not_exceeding_max = state.bets[current_player] <= state.max_bet
-        assert legal_actions[universal_poker.CALL] == (has_chips and bet_not_exceeding_max), "Should be able to call partially"
-        
-        # Should not be able to raise (insufficient total chips)
-        total_chips = state.stacks[current_player] + state.bets[current_player]
-        assert total_chips < state.max_bet, f"Total chips {total_chips} should be < max_bet {state.max_bet}"
-        assert legal_actions[universal_poker.RAISE] == False, "Should not be able to raise with insufficient chips"
+        # Should not be able to do anything, folded
+        assert state.folded[current_player] == True, "Should be auto-folded at game start, not enough chips for big blind"
+        assert legal_actions[universal_poker.FOLD] == False, "Should not be able to fold"
+        assert legal_actions[universal_poker.CALL] == False, "Should not be able to fold"
+        assert legal_actions[universal_poker.RAISE] == False, "Should not be able to fold"
+        assert state.round == 0, "Game should be terminated in first round"
+        assert state.terminated == True, "Only one player left, game is over"
     
     def test_legal_actions_can_raise(self):
         """Test legal actions when player has enough chips to raise."""
@@ -320,8 +315,8 @@ if __name__ == "__main__":
         legal_actions_suite.test_legal_actions_exact_call_amount()
         print("✓ Legal actions exact call amount test passed")
         
-        legal_actions_suite.test_legal_actions_insufficient_chips_to_call()
-        print("✓ Legal actions insufficient chips to call test passed")
+        legal_actions_suite.test_legal_actions_insufficient_chips_to_call_big_blind()
+        print("✓ Legal actions insufficient chips to call big blind test passed")
         
         legal_actions_suite.test_legal_actions_can_raise()
         print("✓ Legal actions can raise test passed")
