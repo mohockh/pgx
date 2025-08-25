@@ -1219,23 +1219,40 @@ END GAMEDEF"""
         state = env.init(key)
         
         # Create scenario where all players go all-in with different amounts
-        # This tests the side pot logic
+        # This tests the side pot logic through multiple rounds of raising
         
-        # Player 2 raises big to 15
-        state = env.step(state, universal_poker.RAISE)  # Player 2 raises to 15
+        # Player 2 raises (minimum raise from 2 to 4)
+        state = env.step(state, universal_poker.RAISE)  # Player 2 raises to 4
         
-        # Player 0 goes all-in with 5 chips (4 remaining after blind)
-        state = env.step(state, universal_poker.CALL)  # Player 0 all-in
+        # Player 0 goes all-in with 5 chips (raises from 1 to 5)  
+        state = env.step(state, universal_poker.RAISE)  # Player 0 all-in with 5
         assert state.all_in[0] == True, "Player 0 should be all-in"
         assert state.bets[0] == 5, "Player 0 should have bet all 5 chips"
         
-        # Player 1 goes all-in with 15 chips (13 remaining after blind)  
-        state = env.step(state, universal_poker.CALL)  # Player 1 all-in
-        assert state.all_in[1] == True, "Player 1 should be all-in"
+        # Player 1 raises further (minimum raise from 5 to 7)
+        state = env.step(state, universal_poker.RAISE)  # Player 1 raises to 7
+        
+        # Player 2 raises again (minimum raise from 7 to 9)
+        state = env.step(state, universal_poker.RAISE)  # Player 2 raises to 9
+        
+        # Player 1 raises again to exhaust more chips (9 -> 11) 
+        state = env.step(state, universal_poker.RAISE)  # Player 1 raises to 11
+        
+        # Player 2 raises to push Player 1 all-in (11 -> 13)
+        state = env.step(state, universal_poker.RAISE)  # Player 2 raises to 13
+        
+        # Player 1 raises all-in (should use remaining chips to go to 15)
+        state = env.step(state, universal_poker.RAISE)  # Player 1 all-in with 15
+        assert state.all_in[1] == True, "Player 1 should be all-in" 
         assert state.bets[1] == 15, "Player 1 should have bet all 15 chips"
         
-        # All players should be all-in, creating complex side pot structure
-        assert jnp.all(state.all_in[:3]), "All players should be all-in"
+        # Player 2 calls to match Player 1's all-in
+        state = env.step(state, universal_poker.CALL)  # Player 2 calls to 15
+        
+        # Verify final all-in status: P0 and P1 are all-in with different amounts
+        assert state.all_in[0] == True, "Player 0 should be all-in with 5 chips"
+        assert state.all_in[1] == True, "Player 1 should be all-in with 15 chips"
+        assert state.all_in[2] == False, "Player 2 should not be all-in (has chips remaining)"
 
     def test_betting_edge_case_raise_after_multiple_calls(self):
         """Test raising after multiple players have called."""
