@@ -20,7 +20,7 @@ MAX_PLAYERS = 10
 
 @dataclass
 class State(core.State):
-    current_player: Array = jnp.int32(0)
+    current_player: Array = jnp.uint32(0)
     observation: Array = jnp.zeros(0, dtype=jnp.bool_)
     rewards: Array = jnp.float32([0.0, 0.0])
     terminated: Array = FALSE
@@ -60,7 +60,7 @@ class State(core.State):
     
     # Action tracking
     num_actions_this_round: Array = jnp.uint32(0)
-    last_raiser: Array = jnp.int32(-1)
+    last_raiser: Array = jnp.uint32(0)
     
     # Pre-computed masks for performance optimization
     player_mask: Array = None  # Which positions are valid players
@@ -304,6 +304,7 @@ class UniversalPoker(core.Env):
             visible_board_cardsets=visible_board_cardsets,
             hand_final_scores=hand_final_scores,
             current_player=0,  # Temporary, will be updated
+            last_raiser=self._num_players,  # Sentinel: no raiser yet
             player_mask=player_mask,
             active_mask=active_mask,
             rewards=jnp.zeros(self._num_players, dtype=jnp.float32),
@@ -494,7 +495,7 @@ class UniversalPoker(core.Env):
         bets = jnp.zeros(self._num_players, dtype=jnp.uint32)
         max_bet = jnp.uint32(0)
         num_actions_this_round = jnp.uint32(0)
-        last_raiser = -1
+        last_raiser = self._num_players
         # Reset min_raise to big blind for new round
         big_blind = jnp.max(self.blind_amounts)
         min_raise = big_blind.astype(jnp.uint32)
