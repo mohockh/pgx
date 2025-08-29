@@ -174,8 +174,8 @@ END GAMEDEF"""
             
             # Check observation is proper array
             assert isinstance(obs, jnp.ndarray)
-            # New format uses mixed int64/int32 types, so we check the overall type
-            assert obs.dtype in [jnp.int64, jnp.int32]  # Concatenation promotes to consistent type
+            # New format uses uint32 types for unified data type
+            assert obs.dtype == jnp.uint32  # All components now unified to uint32
             
             # Check new observation size: [hole_cardset[2], board_cardset[2], pot, stack, bets[num_players], folded[num_players], round]
             expected_size = 2 + 2 + 1 + 1 + state.num_players + state.num_players + 1  # cardsets uint32[2] + game state

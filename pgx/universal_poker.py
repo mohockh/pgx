@@ -5,30 +5,18 @@ import pgx.core as core
 from pgx._src.struct import dataclass
 from pgx._src.types import Array, PRNGKey
 from .poker_eval.evaluator import evaluate_hand
-from .poker_eval.cardset import cards_to_cardset, cardset_to_cards, add_card_to_cardset, create_empty_cardset, cardset_or, cardset_and, cardset_not
+from .poker_eval.cardset import cards_to_cardset, create_empty_cardset, cardset_or
 
 FALSE = jnp.bool_(False)
 TRUE = jnp.bool_(True)
 
 # Action types
-FOLD = jnp.int32(0)
-CALL = jnp.int32(1)
-RAISE = jnp.int32(2)
+FOLD = jnp.uint32(0)
+CALL = jnp.uint32(1)
+RAISE = jnp.uint32(2)
 
 # Maximum number of players supported
 MAX_PLAYERS = 10
-
-# Hand strength rankings (from weakest to strongest)
-HIGH_CARD = 0
-PAIR = 1
-TWO_PAIR = 2
-THREE_OF_A_KIND = 3
-STRAIGHT = 4
-FLUSH = 5
-FULL_HOUSE = 6
-FOUR_OF_A_KIND = 7
-STRAIGHT_FLUSH = 8
-
 
 @dataclass
 class State(core.State):
@@ -38,21 +26,21 @@ class State(core.State):
     terminated: Array = FALSE
     truncated: Array = FALSE
     legal_action_mask: Array = jnp.ones(3, dtype=jnp.bool_)
-    _step_count: Array = jnp.int32(0)
+    _step_count: Array = jnp.uint32(0)
     
     # Universal Poker specific fields
-    num_players: Array = jnp.int32(2)
-    num_hole_cards: Array = jnp.int32(2)
-    num_board_cards: Array = jnp.array([0, 3, 1, 1], dtype=jnp.int32)  # preflop, flop, turn, river
-    num_ranks: Array = jnp.int32(13)
-    num_suits: Array = jnp.int32(4)
+    num_players: Array = jnp.uint32(2)
+    num_hole_cards: Array = jnp.uint32(2)
+    num_board_cards: Array = jnp.array([0, 3, 1, 1], dtype=jnp.uint32)  # preflop, flop, turn, river
+    num_ranks: Array = jnp.uint32(13)
+    num_suits: Array = jnp.uint32(4)
     
     # Game state
-    round: Array = jnp.int32(0)  # 0=preflop, 1=flop, 2=turn, 3=river
-    pot: Array = jnp.int32(0)
-    stacks: Array = None  # Number of players elements.
-    bets: Array = None  # Number of players elements.
-    folded: Array = None  # Number of players elements.
+    round: Array = jnp.uint32(0)  # 0=preflop, 1=flop, 2=turn, 3=river
+    pot: Array = jnp.uint32(0)
+    stacks: Array = None  # Number of players elements (uint32).
+    bets: Array = None  # Number of players elements (uint32).
+    folded: Array = None  # Number of players elements (bool).
     all_in: Array = None  # Number of players elements.
     
     # Cards (using cardset representation for memory efficiency)
@@ -66,12 +54,12 @@ class State(core.State):
     hand_final_scores: Array = None  # Final hand strength for each player.
     
     # Betting info
-    first_player: Array = jnp.array([3, 1, 1, 1], dtype=jnp.int32)  # first to act each round
-    max_bet: Array = jnp.int32(0)
-    min_raise: Array = jnp.int32(0)  # Minimum raise amount
+    first_player: Array = jnp.array([3, 1, 1, 1], dtype=jnp.uint32)  # first to act each round
+    max_bet: Array = jnp.uint32(0)
+    min_raise: Array = jnp.uint32(0)  # Minimum raise amount
     
     # Action tracking
-    num_actions_this_round: Array = jnp.int32(0)
+    num_actions_this_round: Array = jnp.uint32(0)
     last_raiser: Array = jnp.int32(-1)
     
     # Pre-computed masks for performance optimization
@@ -89,13 +77,15 @@ class UniversalPoker(core.Env):
         
         # Set default values
         self._num_players = num_players
+        assert num_players <= MAX_PLAYERS, f"{num_players} > {MAX_PLAYERS}"
+
         self._num_rounds = 4  # Default: preflop, flop, turn, river
         
         # Initialize stack_sizes as self._num_players array
-        self.stack_sizes = 200 * jnp.ones(self._num_players, dtype=jnp.int32)
+        self.stack_sizes = 200 * jnp.ones(self._num_players, dtype=jnp.uint32)
         
         # Initialize blind_amounts as self._num_players array with default small/big blind structure
-        self.blind_amounts = jnp.array([1, 2] + [0, ] * (self._num_players - 2), dtype=jnp.int32)
+        self.blind_amounts = jnp.array([1, 2] + [0, ] * (self._num_players - 2), dtype=jnp.uint32)
         
         # Initialize first_player_array with default values
         # ACPC format uses 1-based indexing, so we convert to 0-based
@@ -108,7 +98,7 @@ class UniversalPoker(core.Env):
             preflop_first = (3 - 1) % self._num_players  # 3 -> 2 (0-based)
             postflop_first = (1 - 1) % self._num_players  # 1 -> 0 (0-based)
             default_first_players = [preflop_first] + [postflop_first] * (self._num_rounds - 1)
-        self.first_player_array = jnp.array(default_first_players, dtype=jnp.int32)
+        self.first_player_array = jnp.array(default_first_players, dtype=jnp.uint32)
         
         # Parse config string if provided - this will override the defaults above
         if config_str is not None:
@@ -136,7 +126,7 @@ class UniversalPoker(core.Env):
                 values = self._parse_config_line(line, "stack")
                 if values:
                     # Reset stack_sizes array and populate with config values
-                    self.stack_sizes = jnp.zeros(self._num_players, dtype=jnp.int32)
+                    self.stack_sizes = jnp.zeros(self._num_players, dtype=jnp.uint32)
                     num_values = min(len(values), self._num_players)
                     self.stack_sizes = self.stack_sizes.at[:num_values].set(jnp.array(values[:num_values]))
                 
@@ -145,7 +135,7 @@ class UniversalPoker(core.Env):
                 values = self._parse_config_line(line, "blind")
                 if values:
                     # Reset blind_amounts array and populate with config values
-                    self.blind_amounts = jnp.zeros(self._num_players, dtype=jnp.int32)
+                    self.blind_amounts = jnp.zeros(self._num_players, dtype=jnp.uint32)
                     num_values = min(len(values), self._num_players)
                     self.blind_amounts = self.blind_amounts.at[:num_values].set(jnp.array(values[:num_values]))
                 
@@ -170,7 +160,7 @@ class UniversalPoker(core.Env):
                         preflop_first = (3 - 1) % self._num_players
                         postflop_first = (1 - 1) % self._num_players
                         default_first_players = [preflop_first] + [postflop_first] * (self._num_rounds - 1)
-                    self.first_player_array = jnp.array(default_first_players, dtype=jnp.int32)
+                    self.first_player_array = jnp.array(default_first_players, dtype=jnp.uint32)
                 
             elif line.startswith("firstplayer"):
                 # firstplayer = 3 1 1 1  (first player for each round, 1-based)
@@ -179,7 +169,7 @@ class UniversalPoker(core.Env):
                     # Convert from 1-based to 0-based indexing
                     zero_based_values = [(v - 1) % self._num_players for v in values]
                     # Create array with specified values, pad with zeros if needed
-                    first_players = jnp.zeros(self._num_rounds, dtype=jnp.int32)
+                    first_players = jnp.zeros(self._num_rounds, dtype=jnp.uint32)
                     num_values = min(len(zero_based_values), self._num_rounds)
                     self.first_player_array = first_players.at[:num_values].set(jnp.array(zero_based_values[:num_values]))
     
@@ -206,7 +196,7 @@ class UniversalPoker(core.Env):
         big_blind = jnp.max(self.blind_amounts)
         
         # Identify players who have enough chips to meaningfully participate
-        initial_stacks = jnp.array(self.stack_sizes, dtype=jnp.int32)
+        initial_stacks = jnp.array(self.stack_sizes, dtype=jnp.uint32)
         sufficient_chips_mask = initial_stacks >= big_blind
         
         # Get indices of eligible players using vectorized operations
@@ -219,7 +209,7 @@ class UniversalPoker(core.Env):
         should_terminate = num_active_players < 2
         
         # Initialize betting arrays
-        bets = jnp.zeros(self._num_players, dtype=jnp.int32)
+        bets = jnp.zeros(self._num_players, dtype=jnp.uint32)
         
         # Assign blinds to eligible players using vectorized operations
         # blind_amounts[0] goes to first eligible player, blind_amounts[1] to second, etc.
@@ -228,7 +218,7 @@ class UniversalPoker(core.Env):
         
         # Use vectorized assignment for blind posting with JAX-compatible static indexing
         # Convert boolean mask to integer for eligible players
-        is_eligible_int = sufficient_chips_mask.astype(jnp.int32)
+        is_eligible_int = sufficient_chips_mask.astype(jnp.uint32)
         
         # Get the 1-based order of eligible players using cumsum
         blind_order = jnp.cumsum(is_eligible_int)
@@ -409,17 +399,17 @@ class UniversalPoker(core.Env):
         # Build observation array with appropriate types
         # Format: [hole_cardset[2], board_cardset[2], pot, stack, bets[num_players], folded[num_players], round]
         obs = jnp.concatenate([
-            # Cardsets (flatten uint32[2] arrays for concatenation)
+            # Cardsets (already uint32[2] arrays for concatenation)
             hole_cardset,
             visible_board_cardset,
-            # Game state (int32)
-            jnp.array([state.pot, state.stacks[player_id]], dtype=jnp.int32),
-            # Current bets (int32)
-            state.bets,
-            # Folded status (convert bool to int32)
-            state.folded,
-            # Current round (int32)
-            jnp.array([state.round], dtype=jnp.int32)
+            # Game state (ensure uint32)
+            jnp.array([state.pot, state.stacks[player_id]], dtype=jnp.uint32),
+            # Current bets (ensure uint32)
+            state.bets.astype(jnp.uint32),
+            # Folded status (convert bool to uint32)
+            state.folded.astype(jnp.uint32),
+            # Current round (ensure uint32)
+            jnp.array([state.round], dtype=jnp.uint32)
         ])
         
         return obs
@@ -501,13 +491,13 @@ class UniversalPoker(core.Env):
         new_round = state.round + 1
         
         # Reset betting for new round - use concrete shape
-        bets = jnp.zeros(self._num_players, dtype=jnp.int32)
-        max_bet = 0
-        num_actions_this_round = 0
+        bets = jnp.zeros(self._num_players, dtype=jnp.uint32)
+        max_bet = jnp.uint32(0)
+        num_actions_this_round = jnp.uint32(0)
         last_raiser = -1
         # Reset min_raise to big blind for new round
         big_blind = jnp.max(self.blind_amounts)
-        min_raise = big_blind
+        min_raise = big_blind.astype(jnp.uint32)
         
         # Determine first player for new round
         current_player = self._get_first_player_for_round(state, new_round)
