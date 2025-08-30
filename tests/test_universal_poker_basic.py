@@ -170,7 +170,8 @@ END GAMEDEF"""
         state = env.init(key)
         
         for player_id in range(state.num_players):
-            obs = env.observe(state, player_id)
+            state = state.replace(current_player=player_id)
+            obs = env.observe(state)
             
             # Check observation is proper array
             assert isinstance(obs, jnp.ndarray)
@@ -453,8 +454,8 @@ END GAMEDEF"""
         state = env.init(key)
         
         # Override stacks
-        new_stacks = jnp.zeros(4, dtype=jnp.int32)
-        new_stacks = new_stacks.at[:4].set(jnp.array(stacks))
+        new_stacks = jnp.zeros(4, dtype=jnp.uint32)
+        new_stacks = new_stacks.at[:4].set(jnp.array(stacks, dtype=jnp.uint32))
         state = state.replace(stacks=new_stacks)
         
         # Create specific hole cards for predetermined hand strengths
@@ -505,12 +506,12 @@ END GAMEDEF"""
         # P0 contributed 10, P1 contributed 20, P2 contributed 30, P3 contributed 50
         # This creates the side pot structure we want to test
         
-        final_bets = jnp.array([10, 20, 30, 50])
+        final_bets = jnp.array([10, 20, 30, 50], dtype=jnp.uint32)
         total_pot = 10 + 20 + 30 + 50  # 110
         
         state = state.replace(
             bets=final_bets,
-            pot=jnp.int32(total_pot),
+            pot=jnp.uint32(total_pot),
             rewards=jnp.zeros(4, dtype=jnp.float32)  # Expand rewards to 4 players for this test
         )
         
@@ -710,7 +711,8 @@ END GAMEDEF"""
         
         # Test observations for each player
         for player_id in range(3):
-            obs = env.observe(state, player_id)
+            state = state.replace(current_player=player_id)
+            obs = env.observe(state)
             
             # Check observation structure: [hole_cardset[2], board_cardset[2], pot, stack, bets[num_players], folded[num_players], round]
             expected_size = 2 + 2 + 1 + 1 + 3 + 3 + 1  # 13 elements for 3 players
@@ -722,6 +724,7 @@ END GAMEDEF"""
             
             # Check individual player's stack
             stack_idx = 5  # hole[2] + board[2] + pot[1] = 5
+            print('obs:', obs)
             expected_stacks = [95, 140, 200]
             assert obs[stack_idx] == expected_stacks[player_id]
             

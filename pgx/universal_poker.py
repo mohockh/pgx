@@ -128,7 +128,7 @@ class UniversalPoker(core.Env):
                     # Reset stack_sizes array and populate with config values
                     self.stack_sizes = jnp.zeros(self._num_players, dtype=jnp.uint32)
                     num_values = min(len(values), self._num_players)
-                    self.stack_sizes = self.stack_sizes.at[:num_values].set(jnp.array(values[:num_values]))
+                    self.stack_sizes = self.stack_sizes.at[:num_values].set(jnp.array(values[:num_values], dtype=jnp.uint32))
                 
             elif line.startswith("blind"):
                 # blind = 1 2 0 0 ...
@@ -137,7 +137,7 @@ class UniversalPoker(core.Env):
                     # Reset blind_amounts array and populate with config values
                     self.blind_amounts = jnp.zeros(self._num_players, dtype=jnp.uint32)
                     num_values = min(len(values), self._num_players)
-                    self.blind_amounts = self.blind_amounts.at[:num_values].set(jnp.array(values[:num_values]))
+                    self.blind_amounts = self.blind_amounts.at[:num_values].set(jnp.array(values[:num_values], dtype=jnp.uint32))
                 
             elif line.startswith("numplayers"):
                 # numplayers = 2
@@ -171,7 +171,7 @@ class UniversalPoker(core.Env):
                     # Create array with specified values, pad with zeros if needed
                     first_players = jnp.zeros(self._num_rounds, dtype=jnp.uint32)
                     num_values = min(len(zero_based_values), self._num_rounds)
-                    self.first_player_array = first_players.at[:num_values].set(jnp.array(zero_based_values[:num_values]))
+                    self.first_player_array = first_players.at[:num_values].set(jnp.array(zero_based_values[:num_values], dtype=jnp.uint32))
     
     def _parse_config_line(self, line: str, key: str):
         """Parse a config line like 'key = value1 value2 ...' and return list of integer values."""
@@ -303,8 +303,8 @@ class UniversalPoker(core.Env):
             board_cardset=board_cardset,
             visible_board_cardsets=visible_board_cardsets,
             hand_final_scores=hand_final_scores,
-            current_player=0,  # Temporary, will be updated
-            last_raiser=self._num_players,  # Sentinel: no raiser yet
+            current_player=jnp.uint32(0),  # Temporary, will be updated
+            last_raiser=jnp.uint32(self._num_players),  # Sentinel: no raiser yet
             player_mask=player_mask,
             active_mask=active_mask,
             rewards=jnp.zeros(self._num_players, dtype=jnp.float32),
@@ -392,7 +392,7 @@ class UniversalPoker(core.Env):
         """Generate observation for a specific player."""
         assert isinstance(state, State)
         # Own hole cards as cardset
-        hole_cardset = state.hole_cardsets[player_id]
+        hole_cardset = state.hole_cardsets[state.current_player]
         
         # Visible board cards as cardset - use pre-computed values (optimized)
         visible_board_cardset = state.visible_board_cardsets[state.round]
@@ -404,7 +404,7 @@ class UniversalPoker(core.Env):
             hole_cardset,
             visible_board_cardset,
             # Game state (ensure uint32)
-            jnp.array([state.pot, state.stacks[player_id]], dtype=jnp.uint32),
+            jnp.array([state.pot, state.stacks[state.current_player]], dtype=jnp.uint32),
             # Current bets (ensure uint32)
             state.bets.astype(jnp.uint32),
             # Folded status (convert bool to uint32)
@@ -424,7 +424,7 @@ class UniversalPoker(core.Env):
         is_call = action == CALL
         is_raise = action == RAISE
         
-        # Calculate amounts for call/raise actions (ensure int32 types)
+        # Calculate amounts for call/raise actions (ensure uint32 types)
         call_amount = state.max_bet - state.bets[current_player]
         actual_call = jnp.minimum(call_amount, state.stacks[current_player])
         
@@ -434,20 +434,20 @@ class UniversalPoker(core.Env):
         actual_raise = jnp.minimum(raise_amount, state.stacks[current_player])
         
         # Determine final amounts based on action
-        chips_to_add = jnp.where(is_call, actual_call, jnp.where(is_raise, actual_raise, 0))
+        chips_to_add = jnp.where(is_call, actual_call, jnp.where(is_raise, actual_raise, 0)).astype(jnp.uint32)
         
-        # Update state arrays (ensure int32 types)
+        # Update state arrays (ensure uint32 types)
         new_folded = state.folded.at[current_player].set(state.folded[current_player] | is_fold)
         new_bets = state.bets.at[current_player].add(chips_to_add)
         new_stacks = state.stacks.at[current_player].subtract(chips_to_add)
         new_pot = state.pot + chips_to_add
         new_max_bet = jnp.where(is_raise, jnp.maximum(state.max_bet, new_bets[current_player]), state.max_bet)
         new_all_in = state.all_in.at[current_player].set(new_stacks[current_player] == 0)
-        new_last_raiser = jnp.where(is_raise, current_player, state.last_raiser)
+        new_last_raiser = jnp.where(is_raise, jnp.uint32(current_player), state.last_raiser)
         
         # Update min_raise - calculate raise increment from previous player's bet
         bet_before = state.bets[(current_player - 1) % state.num_players]  # Get previous player's bet amount
-        raise_increment = new_bets[current_player] - bet_before  # This bet raised last player by raise_increment
+        raise_increment = (new_bets[current_player] - bet_before).astype(jnp.uint32)  # This bet raised last player by raise_increment
         new_min_raise = jnp.maximum(state.min_raise, raise_increment)
         
         return state.replace(
@@ -495,7 +495,7 @@ class UniversalPoker(core.Env):
         bets = jnp.zeros(self._num_players, dtype=jnp.uint32)
         max_bet = jnp.uint32(0)
         num_actions_this_round = jnp.uint32(0)
-        last_raiser = self._num_players
+        last_raiser = jnp.uint32(self._num_players)
         # Reset min_raise to big blind for new round
         big_blind = jnp.max(self.blind_amounts)
         min_raise = big_blind.astype(jnp.uint32)
@@ -541,7 +541,7 @@ class UniversalPoker(core.Env):
         priorities = self._num_players - distances
         
         # Set inactive players to have very low priority
-        priorities = jnp.where(active_mask, priorities, -1)
+        priorities = jnp.where(active_mask, priorities, jnp.int32(-1))
         
         # Find player with highest priority (closest active player from start_pos)
         next_player = jnp.argmax(priorities)

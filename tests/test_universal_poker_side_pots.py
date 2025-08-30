@@ -22,12 +22,12 @@ END GAMEDEF"""
         
         # Override state values
         state = state.replace(
-            stacks=jnp.array(stacks, dtype=jnp.int32),
-            bets=jnp.array(bets, dtype=jnp.int32),
+            stacks=jnp.array(stacks, dtype=jnp.uint32),
+            bets=jnp.array(bets, dtype=jnp.uint32),
             folded=jnp.array(folded, dtype=jnp.bool_),
             hand_final_scores=jnp.array(hand_strengths, dtype=jnp.uint32),
             round=4,  # Force showdown
-            pot=pot if pot is not None else jnp.sum(jnp.array(bets)),
+            pot=pot if pot is not None else jnp.sum(jnp.array(bets, dtype=jnp.uint32)),
             rewards=jnp.zeros(num_players, dtype=jnp.float32)  # Set correct reward array size
         )
         
