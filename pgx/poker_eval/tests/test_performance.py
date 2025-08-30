@@ -85,7 +85,7 @@ def test_universal_poker_performance(batch_size: int = 100):
     """Test performance with the actual Universal Poker environment."""
     print("\nTesting Universal Poker performance with cardset evaluator...")
     
-    env = UniversalPoker(num_players=2, stack_size=100)
+    env = UniversalPoker(num_players=2)
     
     # Test vectorized game simulation
     keys = jax.random.split(jax.random.PRNGKey(42), batch_size)

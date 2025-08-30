@@ -7,7 +7,7 @@ This ensures that uint32[2] cardset operations work correctly for poker hand eva
 import jax
 import jax.numpy as jnp
 import pytest
-from ..cardset_ops import *
+from pgx.poker_eval.cardset_ops import *
 
 
 class TestCardsetOperations:

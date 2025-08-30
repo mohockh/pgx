@@ -19,6 +19,11 @@ from .cardset_ops import (
 # Maximum number of cards that can be extracted from a cardset
 MAX_CARDS_IN_CARDSET = 10
 
+# Pre-computed constants for vectorized suit extraction (computed once at module load)
+_SUITS_GRID, _RANKS_GRID = jnp.meshgrid(jnp.arange(4), jnp.arange(13), indexing='ij')
+_BIT_POSITIONS_GRID = (_SUITS_GRID << 4) + _RANKS_GRID  # Shape: (4, 13)
+_RANK_POWERS_GRID = jnp.uint16(1) << _RANKS_GRID  # Shape: (4, 13)
+
 def card_to_id(suit: int, rank: int) -> int:
     """
     Convert suit and rank to card ID.
@@ -47,46 +52,43 @@ def id_to_card(card_id: int) -> Tuple[int, int]:
 @jax.jit
 def cards_to_cardset(cards: jnp.ndarray) -> jnp.ndarray:
     """
-    Convert array of card IDs to ACPC cardset representation using vectorized operations.
+    Convert array of card IDs to ACPC cardset representation using fully vectorized operations.
+    Assumes all cards are valid (0-51).
     
     Args:
-        cards: Array of card IDs
+        cards: Array of valid card IDs (0-51)
         
     Returns:
         uint32[2] cardset array
     """
-    # Filter out invalid cards (-1)
-    valid_mask = cards >= 0
-    valid_cards = jnp.where(valid_mask, cards, 0).astype(jnp.uint32)
+    cards = cards.astype(jnp.uint32)
     
     # Convert to suits and ranks (vectorized)
-    suits = valid_cards // 13
-    ranks = valid_cards % 13
+    suits = cards // 13
+    ranks = cards % 13
     
     # Calculate bit positions: (suit << 4) + rank
     bit_positions = (suits << 4) + ranks
     
-    # Create bit masks for each card using uint32[2] operations
-    empty_cardset = create_empty_cardset()
+    # Create bit masks for all cards simultaneously (vectorized)
+    # For low 32 bits (bit_pos < 32)
+    low_masks = jnp.where(bit_positions < 32, 
+                          jnp.uint32(1) << bit_positions, jnp.uint32(0))
     
-    def add_card_if_valid(cardset, i):
-        return jnp.where(
-            valid_mask[i],
-            set_bit(cardset, bit_positions[i]),
-            cardset
-        )
+    # For high 32 bits (bit_pos >= 32)  
+    high_masks = jnp.where(bit_positions >= 32,
+                           jnp.uint32(1) << (bit_positions - 32), jnp.uint32(0))
     
-    # Build cardset by setting bits for valid cards
-    cardset = empty_cardset
-    for i in range(cards.shape[0]):
-        cardset = add_card_if_valid(cardset, i)
+    # Combine all masks using vectorized OR operations
+    low_combined = jnp.bitwise_or.reduce(low_masks)
+    high_combined = jnp.bitwise_or.reduce(high_masks)
     
-    return cardset
+    return jnp.array([low_combined, high_combined], dtype=jnp.uint32)
 
 @jax.jit
 def extract_suit_ranks(cardset: jnp.ndarray) -> jnp.ndarray:
     """
-    Extract rank patterns for each suit from cardset.
+    Extract rank patterns for each suit from cardset using pure bit operations.
     
     Args:
         cardset: uint32[2] cardset array
@@ -94,19 +96,25 @@ def extract_suit_ranks(cardset: jnp.ndarray) -> jnp.ndarray:
     Returns:
         Array of 4 integers, each with 13 bits representing ranks in that suit
     """
-    suit_ranks = jnp.zeros(4, dtype=jnp.uint16)
+    # Use pre-computed bit positions grid
+    bit_positions = _BIT_POSITIONS_GRID  # Shape: (4, 13)
     
-    # Extract ranks for each suit using JAX operations
-    for suit in range(4):
-        ranks = jnp.uint16(0)
-        for rank in range(13):
-            bit_pos = (suit << 4) + rank
-            # Use uint32[2] operations
-            bit_set = get_bit(cardset, bit_pos)
-            ranks |= jnp.uint16(bit_set << rank)
-        suit_ranks = suit_ranks.at[suit].set(ranks)
+    # Extract all bits using bit shifts (no conditionals)
+    # For low word: shift cardset[0] right by bit_pos, mask with 1
+    low_bits = (cardset[0] >> bit_positions) & 1  # Shape: (4, 13)
     
-    return suit_ranks
+    # For high word: shift cardset[1] right by (bit_pos - 32), mask with 1
+    # When bit_pos < 32, this gives us bits from very high positions (which are 0)
+    high_bits = (cardset[1] >> (bit_positions - 32)) & 1  # Shape: (4, 13)
+    
+    # Select appropriate bits: use high_bits when bit_pos >= 32, else use low_bits
+    # This is equivalent to: bit_pos >= 32 ? high_bits : low_bits
+    valid_bits = jnp.where(bit_positions >= 32, high_bits, low_bits)  # Shape: (4, 13)
+    
+    # Convert to rank patterns using pre-computed powers
+    suit_patterns = jnp.sum(valid_bits * _RANK_POWERS_GRID, axis=1, dtype=jnp.uint16)
+    
+    return suit_patterns
 
 @jax.jit
 def cards_to_suit_patterns(cards: jnp.ndarray) -> jnp.ndarray:
