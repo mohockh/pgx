@@ -12,17 +12,23 @@ This is a JAX-based poker environment implementation for the PGX (Python Game eX
 ## Development Commands
 
 ### Testing
-For testing the Universal Poker game, use the following testing methods.
+Always run all regression tests before you're done making any changes.
 
 ```bash
-# Run all tests
+# Run all regression tests
 PYTHONPATH=$PYTHONPATH:~/poker/pgx python3 -m pytest -n 4 -vv tests/test_universal_poker*.py --ignore=tests/test_universal_poker_speed.py
+```
 
-# Run speed / benchmark tests
-PYTHONPATH=$PYTHONPATH:~/poker/pgx python3 tests/test_universal_poker_speed.py
-
+While fixing a particular regression test, you can run just that one test after making changes like this.
+```bash
 # Run specific unit test methods
 PYTHONPATH=$PYTHONPATH:~/poker/pgx python3 -c "from tests.test_universal_poker import TestUniversalPoker; TestUniversalPoker().test_init_basic()"
+```
+
+To measure the speed of the game simulation, run test_universal_poker_speed.py.  It will run a test with 1000000 hands and output a hands/sec.  That is the best measure of end-to-end speed.
+```bash
+# Run speed / benchmark tests
+PYTHONPATH=$PYTHONPATH:~/poker/pgx python3 tests/test_universal_poker_speed.py
 ```
 
 ### Game Flow
@@ -32,7 +38,7 @@ PYTHONPATH=$PYTHONPATH:~/poker/pgx python3 -c "from tests.test_universal_poker i
 4. **Termination**: Single winner or showdown evaluation
 
 ### Key Constants
-- `MAX_PLAYERS = 10` - Fixed array size for JAX compatibility
+- `MAX_PLAYERS = 10` - Fixed size for JAX compatibility
 - Action types: `FOLD=0`, `CALL=1`, `RAISE=2`
 - Rounds: `0=preflop`, `1=flop`, `2=turn`, `3=river`
 
@@ -59,5 +65,5 @@ PYTHONPATH=$PYTHONPATH:~/poker/pgx python3 -c "from tests.test_universal_poker i
 
 ## Performance Metrics
 - **Original**: ~16GB memory usage in vectorized mode, 200k hands/sec.
-- **Current**: ~15GB memory usage in vectorized mode, 80k hands/sec.
+- **Current**: ~14.5GB memory usage in vectorized mode, 90k hands/sec.
 - **Test coverage**: 105 comprehensive test cases, all passing
