@@ -67,14 +67,39 @@ baseline = pgx.make_baseline_model(config.env_id + "_v0")
 
 
 def forward_fn(x, is_eval=False):
-    net = AZNet(
-        num_actions=env.num_actions,
-        num_channels=config.num_channels,
-        num_blocks=config.num_layers,
-        resnet_v2=config.resnet_v2,
-    )
-    policy_out, value_out = net(x, is_training=not is_eval, test_local_stats=False)
-    return policy_out, value_out
+    if config.env_id == "universal_poker":
+        # Use a simple feedforward network for poker with 1D observations
+        x = x.astype(jnp.float32)
+        x = hk.Flatten()(x)
+        
+        # Policy network
+        policy_hidden = hk.Linear(config.num_channels)(x)
+        policy_hidden = jax.nn.relu(policy_hidden)
+        for _ in range(config.num_layers - 1):
+            policy_hidden = hk.Linear(config.num_channels)(policy_hidden)
+            policy_hidden = jax.nn.relu(policy_hidden)
+        policy_out = hk.Linear(env.num_actions)(policy_hidden)
+        
+        # Value network
+        value_hidden = hk.Linear(config.num_channels)(x)
+        value_hidden = jax.nn.relu(value_hidden)
+        for _ in range(config.num_layers - 1):
+            value_hidden = hk.Linear(config.num_channels)(value_hidden)
+            value_hidden = jax.nn.relu(value_hidden)
+        value_out = hk.Linear(1)(value_hidden)
+        value_out = jnp.tanh(value_out).flatten()
+        
+        return policy_out, value_out
+    else:
+        # Use CNN architecture for board games
+        net = AZNet(
+            num_actions=env.num_actions,
+            num_channels=config.num_channels,
+            num_blocks=config.num_layers,
+            resnet_v2=config.resnet_v2,
+        )
+        policy_out, value_out = net(x, is_training=not is_eval, test_local_stats=False)
+        return policy_out, value_out
 
 
 forward = hk.without_apply_rng(hk.transform_with_state(forward_fn))

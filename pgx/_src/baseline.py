@@ -18,11 +18,14 @@ BaselineModelId = Literal[
     "minatar-freeway_v0",
     "minatar-seaquest_v0",
     "minatar-space_invaders_v0",
+    "universal_poker_v0",
 ]
 
 
 def make_baseline_model(model_id: BaselineModelId, download_dir: str = "baselines"):
-    if model_id in (
+    if model_id == "universal_poker_v0":
+        return _make_universal_poker_baseline_model()
+    elif model_id in (
         "animal_shogi_v0",
         "gardner_chess_v0",
         "go_9x9_v0",
@@ -239,3 +242,50 @@ def _create_az_model_v0(
             return logits, value
 
     return AZNet(num_actions, num_channels, num_layers, resnet_v2)
+
+
+def _make_universal_poker_baseline_model():
+    """Create a simple random baseline model for universal poker."""
+    import haiku as hk
+    import pgx
+
+    # Get the environment to determine num_actions
+    env = pgx.make("universal_poker")
+    num_actions = env.num_actions
+    
+    # Create a simple linear model for poker
+    def forward_fn(x):
+        # Flatten the observation
+        x = x.astype(jnp.float32)
+        x = hk.Flatten()(x)
+
+        # Simple feedforward network
+        x = jax.nn.relu(hk.Linear(128)(x))
+        x = jax.nn.relu(hk.Linear(128)(x) + x)
+        x = jax.nn.relu(hk.Linear(128)(x) + x)
+        x = jax.nn.relu(hk.Linear(64)(x))
+        
+        # Policy head
+        logits = hk.Linear(num_actions)(x)
+        
+        # Value head
+        value = hk.Linear(32)(x)
+        value = jax.nn.relu(value)
+        value = hk.Linear(1)(value)
+        value = jnp.tanh(value)
+        value = value.reshape((-1,))
+        
+        return logits, value
+
+    forward = hk.without_apply_rng(hk.transform(forward_fn))
+    
+    # Initialize with random parameters using a dummy observation
+    dummy_state = env.init(jax.random.PRNGKey(0))
+    dummy_obs = env.observe(dummy_state, dummy_state.current_player)
+    model_params = forward.init(jax.random.PRNGKey(42), dummy_obs[None, :])
+
+    def apply(obs):
+        logits, value = forward.apply(model_params, obs)
+        return logits, value
+
+    return apply

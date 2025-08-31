@@ -61,6 +61,7 @@ EnvId = Literal[
     "shogi",
     "sparrow_mahjong",
     "tic_tac_toe",
+    "universal_poker",
 ]
 
 
@@ -421,6 +422,10 @@ def make(env_id: EnvId):  # noqa: C901
         from pgx.tic_tac_toe import TicTacToe
 
         return TicTacToe()
+    elif env_id == "universal_poker":
+        from pgx.universal_poker import UniversalPoker
+
+        return UniversalPoker()
     else:
         envs = "\n".join(available_envs())
         raise ValueError(f"Wrong env_id '{env_id}' is passed. Available ids are: \n{envs}")
