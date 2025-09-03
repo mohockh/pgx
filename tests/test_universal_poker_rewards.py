@@ -221,14 +221,16 @@ END GAMEDEF"""
         rewards = env._calculate_rewards(state)
         
         # Only P0 and P2 are active (P1 folded)
-        # Side pot calculation between P0 and P2:
-        # Layer 1 (0-20): 20 * 2 = 40 chips, P2 wins -> 40
-        # Layer 2 (20-40): 20 * 1 = 20 chips, P2 wins -> 20  
-        # Total: P0=0, P1=0 (folded), P2=60
+        # Side pot calculation includes ALL contributions (including folded P1):
+        # Total pot: 20+30+40 = 90 chips
+        # Layer 1 (0-20): 20 * 3 = 60 chips, P2 wins (best among active) -> 60
+        # Layer 2 (20-30): 10 * 2 = 20 chips, P2 wins (best among active) -> 20
+        # Layer 3 (30-40): 10 * 1 = 10 chips, P2 wins (only one eligible) -> 10
+        # Total: P0=0, P1=0 (folded), P2=90
         
         assert rewards[0] == 0.0, f"P0 should get 0, got {rewards[0]}"
         assert rewards[1] == 0.0, f"P1 should get 0 (folded), got {rewards[1]}"
-        assert rewards[2] == 60.0, f"P2 should get 60, got {rewards[2]}"
+        assert rewards[2] == 90.0, f"P2 should get 90 (entire pot), got {rewards[2]}"
         
     def test_zero_contribution_player(self):
         """Test when one player has zero contribution."""
@@ -569,6 +571,189 @@ END GAMEDEF"""
         assert hand_final_scores[1] == hand_final_scores[2], "P1 and P2 should have same hand strength (Aces and 8s)"
         assert hand_final_scores[1] > hand_final_scores[3], "P1 should have better hand than P3 (Aces and 8s > Aces and 5s)"
         assert hand_final_scores[2] > hand_final_scores[3], "P2 should have better hand than P3 (Aces and 8s > Aces and 5s)"
+
+    # Multi-round betting tests that should FAIL before the fix and PASS after
+    def test_multi_round_bet_accumulation_failing(self):
+        """Test that demonstrates the bug: previous round bets are lost in reward calculation.
+        
+        This test should FAIL before the fix and PASS after the fix.
+        """
+        # Create a 2-player scenario where both players bet in multiple rounds
+        # Default blinds: P0=1 (SB), P1=2 (BB), min raise = 2
+        env = universal_poker.UniversalPoker(num_players=2)
+        key = jax.random.PRNGKey(42)
+        
+        # Create initial state  
+        state = env.init(key)
+        
+        # Override to create controlled multi-round scenario
+        # Preflop: P0 has 1 (SB), P1 has 2 (BB) - then both call/raise for equal total
+        # P0 total: 1 (blind) + 6 (raise to 7) + 4 (flop bet) = 11 total
+        # P1 total: 2 (blind) + 5 (call to 7) + 4 (flop bet) = 11 total
+        # Both should have equal contributions and split the pot equally
+        
+        # Simulate the state after multiple rounds of betting  
+        state = state.replace(
+            round=4,  # Force showdown
+            terminated=True,
+            stacks=jnp.array([189, 189], dtype=jnp.uint32),  # 200 - 11 = 189 each
+            bets=jnp.array([4, 4], dtype=jnp.uint32),        # Final round bets only (this is the bug!)
+            previous_round_bets=jnp.array([0, 0], dtype=jnp.uint32),  # Initialize for test
+            # In reality, total contributions should be [11, 11] but current system only sees [4, 4]
+            pot=jnp.uint32(22),  # Total pot is correct: 1+2+6+5+4+4=22
+            folded=jnp.array([False, False], dtype=jnp.bool_),
+            hand_final_scores=jnp.array([5000, 5000], dtype=jnp.uint32),  # Tied hands
+            player_mask=jnp.array([True, True], dtype=jnp.bool_),
+            active_mask=jnp.array([True, True], dtype=jnp.bool_),
+            rewards=jnp.zeros(2, dtype=jnp.float32)
+        )
+        
+        rewards = env._calculate_rewards(state)
+        
+        # With the bug: rewards calculated on [4, 4] contributions (final round only)
+        # Both appear equal, so should split: 11 each
+        # After fix: rewards calculated on [11, 11] total contributions  
+        # Both should get 11.0 (equal split) - same result but for correct reason
+        
+        # This test demonstrates the bug in a different scenario - let's make contributions unequal
+        # Change to: P0 final round = 6, P1 final round = 2, but equal total contributions
+        state = state.replace(
+            bets=jnp.array([6, 2], dtype=jnp.uint32),  # Unequal final round bets
+            previous_round_bets=jnp.array([5, 9], dtype=jnp.uint32),  # Previous rounds: P0=5, P1=9
+            # Total contributions are [5+6, 9+2] = [11, 11] - equal!
+            pot=jnp.uint32(22)  # 5+9+6+2 = 22
+        )
+        
+        rewards = env._calculate_rewards(state)
+        
+        # With the bug: rewards calculated on [6, 2] - P0 gets more
+        # After fix: rewards calculated on [11, 11] total - equal split  
+        
+        # This assertion will FAIL before fix (rewards won't be equal)
+        # and PASS after fix (rewards will be equal)
+        try:
+            assert rewards[0] == 11.0, f"P0 should get 11 (equal split), got {rewards[0]}"
+            assert rewards[1] == 11.0, f"P1 should get 11 (equal split), got {rewards[1]}"
+            # If we reach here, the fix worked
+        except AssertionError:
+            # This is expected before the fix - demonstrates the bug
+            print(f"BUG DEMONSTRATED: Rewards are {rewards} instead of [11.0, 11.0] due to multi-round betting issue")
+            raise
+    
+    def test_multi_round_side_pot_distribution_failing(self):
+        """Test multi-round side pot distribution bug with 3 players.
+        
+        Should FAIL before fix, PASS after fix.
+        """
+        # Use custom config with larger blinds for easier math
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 200 200 200
+blind = 2 4 0
+END GAMEDEF"""
+        
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
+        key = jax.random.PRNGKey(123)
+        state = env.init(key)
+        
+        # 3 players with different betting patterns across rounds but equal total contributions
+        # P0: 2 (SB) + 10 (preflop) + 8 (flop) = 20 total
+        # P1: 4 (BB) + 8 (preflop) + 8 (flop) = 20 total  
+        # P2: 0 + 12 (preflop) + 8 (flop) = 20 total
+        # All equal total contributions, should split equally
+        
+        state = state.replace(
+            round=4,  # Showdown
+            terminated=True,
+            stacks=jnp.array([180, 180, 180], dtype=jnp.uint32),  # 200 - 20 = 180 each
+            bets=jnp.array([8, 8, 8], dtype=jnp.uint32),          # Final round bets (equal)
+            # This won't show the bug clearly since final round is equal
+            # Let's make final round unequal but total equal:
+            # P0: 2 (SB) + 6 (preflop) + 12 (flop) = 20 total
+            # P1: 4 (BB) + 10 (preflop) + 6 (flop) = 20 total  
+            # P2: 0 + 12 (preflop) + 8 (flop) = 20 total
+        )
+        
+        state = state.replace(
+            bets=jnp.array([12, 6, 8], dtype=jnp.uint32),  # Unequal final round (bug!)
+            previous_round_bets=jnp.array([8, 14, 12], dtype=jnp.uint32),  # Previous rounds
+            # Total contributions: [8+12, 14+6, 12+8] = [20, 20, 20] - equal!
+            pot=jnp.uint32(60),  # 8+14+12+12+6+8 = 60
+            folded=jnp.array([False, False, False], dtype=jnp.bool_),
+            hand_final_scores=jnp.array([6000, 6000, 6000], dtype=jnp.uint32),  # All tied
+            player_mask=jnp.array([True, True, True], dtype=jnp.bool_),
+            active_mask=jnp.array([True, True, True], dtype=jnp.bool_),
+            rewards=jnp.zeros(3, dtype=jnp.float32)
+        )
+        
+        rewards = env._calculate_rewards(state)
+        
+        # Bug: side pot calculation uses [12, 6, 8] contributions - P0 gets most
+        # Fix: side pot calculation uses [20, 20, 20] total - equal split of 20 each
+        
+        try:
+            assert rewards[0] == 20.0, f"P0 should get 20 (equal split), got {rewards[0]}"
+            assert rewards[1] == 20.0, f"P1 should get 20 (equal split), got {rewards[1]}" 
+            assert rewards[2] == 20.0, f"P2 should get 20 (equal split), got {rewards[2]}"
+        except AssertionError:
+            print(f"BUG DEMONSTRATED: Multi-round side pot rewards are {rewards} instead of [20.0, 20.0, 20.0]")
+            raise
+    
+    def test_multi_round_early_all_in_failing(self):
+        """Test multi-round scenario where player goes all-in early.
+        
+        Should FAIL before fix, PASS after fix.
+        """
+        # Use custom config for easier math
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 50 100 100
+blind = 2 4 0
+END GAMEDEF"""
+        
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
+        key = jax.random.PRNGKey(456)
+        state = env.init(key)
+        
+        # P0 goes all-in preflop (50 total), others continue betting
+        # P0: 2 (SB) + 48 (all-in) + 0 (can't bet more) = 50 total
+        # P1: 4 (BB) + 44 (call) + 10 (flop) = 58 total  
+        # P2: 0 + 48 (call) + 10 (flop) = 58 total
+        # P0 should be eligible for main pot based on 50 contribution
+        
+        state = state.replace(
+            round=4,  # Showdown  
+            terminated=True,
+            stacks=jnp.array([0, 42, 42], dtype=jnp.uint32),   # P0 all-in, others have chips left
+            bets=jnp.array([0, 10, 10], dtype=jnp.uint32),     # Final round only (bug!)
+            previous_round_bets=jnp.array([50, 48, 48], dtype=jnp.uint32),  # Previous rounds
+            # Total contributions: [50+0, 48+10, 48+10] = [50, 58, 58]
+            pot=jnp.uint32(166),  # 50+48+48+0+10+10 = 166
+            folded=jnp.array([False, False, False], dtype=jnp.bool_),
+            all_in=jnp.array([True, False, False], dtype=jnp.bool_),
+            hand_final_scores=jnp.array([8000, 4000, 2000], dtype=jnp.uint32),  # P0 best hand
+            player_mask=jnp.array([True, True, True], dtype=jnp.bool_),
+            active_mask=jnp.array([False, True, True], dtype=jnp.bool_),  # P0 all-in, others active
+            rewards=jnp.zeros(3, dtype=jnp.float32)
+        )
+        
+        rewards = env._calculate_rewards(state)
+        
+        # Bug: P0 seen as contributing 0 (final round), gets nothing  
+        # Fix: P0 seen as contributing 50, eligible for main pot with best hand
+        # Expected with fix:
+        # - Main pot (50*3=150): P0 wins with best hand = 150 to P0
+        # - Side pot (8*2=16): P1 and P2 tie = 8 each
+        # Total: P0=150, P1=8, P2=8
+        
+        try:
+            # P0 should win main pot with best hand and 50 contribution
+            assert rewards[0] >= 130.0, f"P0 should win main pot (~150), got {rewards[0]}"
+            # Total should equal pot
+            assert abs(sum(rewards) - 166.0) < 0.1, f"Total rewards {sum(rewards)} should equal pot 166"
+        except AssertionError:
+            print(f"BUG DEMONSTRATED: Early all-in rewards are {rewards}, P0 should win main pot with best hand")
+            raise
 
 
 if __name__ == "__main__":

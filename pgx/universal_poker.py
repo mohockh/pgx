@@ -40,6 +40,7 @@ class State(core.State):
     pot: Array = jnp.uint32(0)
     stacks: Array = None  # Number of players elements (uint32).
     bets: Array = None  # Number of players elements (uint32).
+    previous_round_bets: Array = None  # Cumulative bets from previous rounds (uint32).
     folded: Array = None  # Number of players elements (bool).
     all_in: Array = None  # Number of players elements.
     
@@ -245,6 +246,7 @@ class UniversalPoker(core.Env):
             num_players=self._num_players,
             stacks=initial_stacks,  # Use initial stacks before blind posting
             bets=jnp.zeros(self._num_players, dtype=jnp.uint32),  # No bets yet
+            previous_round_bets=jnp.zeros(self._num_players, dtype=jnp.uint32),  # No previous bets yet
             folded=folded,
             all_in=jnp.zeros(self._num_players, dtype=jnp.bool_),  # No all-ins yet
             pot=jnp.uint32(0),  # No pot yet
@@ -484,6 +486,9 @@ class UniversalPoker(core.Env):
         """Advance to the next betting round."""
         new_round = state.round + 1
         
+        # Accumulate current round bets into previous_round_bets before reset
+        new_previous_round_bets = state.previous_round_bets + state.bets
+        
         # Reset betting for new round - use concrete shape
         bets = jnp.zeros(self._num_players, dtype=jnp.uint32)
         max_bet = jnp.uint32(0)
@@ -499,6 +504,7 @@ class UniversalPoker(core.Env):
         return state.replace(
             round=new_round,
             bets=bets,
+            previous_round_bets=new_previous_round_bets,
             max_bet=max_bet,
             min_raise=min_raise,
             current_player=current_player,
@@ -573,14 +579,15 @@ class UniversalPoker(core.Env):
             return rewards.at[single_winner_idx].set(state.pot)
         
         def side_pot_calculation():
-            # Use contributions (bets) and hand strengths for active players only - keep as uint32
-            contributions = jnp.where(active_mask, state.bets, jnp.uint32(0))
+            # Use total contributions (previous rounds + current round) from ALL players - keep as uint32
+            total_contributions = state.previous_round_bets + state.bets
+            # Only active players can win - mask out inactive players' hand strengths
             hand_strengths = jnp.where(active_mask, state.hand_final_scores, jnp.uint32(0))
             
             # --- 1. Identify Pot Layers ---
             # Find unique contribution levels to define pot boundaries
             # JAX requires concrete size for unique() - use large fill value to avoid duplicates
-            all_pot_levels = jnp.unique(jnp.concatenate([jnp.array([0], dtype=jnp.uint32), contributions]), size=self._num_players+1, fill_value=jnp.uint32(999999))
+            all_pot_levels = jnp.unique(jnp.concatenate([jnp.array([0], dtype=jnp.uint32), total_contributions]), size=self._num_players+1, fill_value=jnp.uint32(999999))
             # Only use levels that are not the fill value
             valid_levels_mask = all_pot_levels < 999999
             # Calculate increments only for consecutive valid levels  
@@ -592,7 +599,7 @@ class UniversalPoker(core.Env):
             # --- 2. Determine Player Eligibility for Each Pot Layer ---
             # Create a 2D boolean mask (num_players x num_pot_layers)
             # eligible_mask[i, j] is True if player `i` is eligible for pot layer `j`
-            eligible_mask = contributions[:, jnp.newaxis] >= pot_levels[jnp.newaxis, 1:]
+            eligible_mask = total_contributions[:, jnp.newaxis] >= pot_levels[jnp.newaxis, 1:]
             
             # --- 3. Calculate the Size of Each Pot Layer ---
             # Count eligible players for each layer
