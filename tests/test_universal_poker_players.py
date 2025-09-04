@@ -345,8 +345,9 @@ class TestUniversalPokerPlayers:
         if state3.terminated:
             # Should be able to access all 3 reward positions
             assert len(state3.rewards) == 3
-            # Winner should be among the non-folded players
-            assert sum(float(r) for r in state3.rewards) > 0, "Total rewards should be positive"
+            # With net stack change semantics, total should be zero (chip conservation)
+            total_reward = sum(float(r) for r in state3.rewards)
+            assert abs(total_reward) < 0.01, f"Total net stack changes should sum to zero, got {total_reward}"
 
         # Test termination with 4 players
         env4 = universal_poker.UniversalPoker(num_players=4)
@@ -361,7 +362,9 @@ class TestUniversalPokerPlayers:
 
         if state4.terminated:
             assert len(state4.rewards) == 4
-            assert sum(float(r) for r in state4.rewards) > 0, "Total rewards should be positive"
+            # With net stack change semantics, total should be zero (chip conservation)
+            total_reward = sum(float(r) for r in state4.rewards)
+            assert abs(total_reward) < 0.01, f"Total net stack changes should sum to zero, got {total_reward}"
 
     def test_early_termination_no_advancement(self):
         """Test that when game terminates early, we don't advance player/round unnecessarily."""

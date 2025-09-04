@@ -324,15 +324,22 @@ class UniversalPoker(core.Env):
             stacks=stacks_after_blinds, bets=bets, pot=pot, max_bet=max_bet, all_in=all_in, active_mask=active_mask
         )
 
-        # If game should terminate, calculate rewards immediately (vectorized)
-        final_rewards = jax.lax.cond(
+        # If game should terminate, calculate rewards and update stacks immediately (vectorized)
+        def calculate_terminal_state():
+            terminal_winnings = self._calculate_terminal_winnings(state_with_blinds)
+            final_rewards = self._calculate_rewards(state_with_blinds)
+            updated_stacks = state_with_blinds.stacks + terminal_winnings
+            # Reset pot to 0 since all chips have been distributed to players
+            return final_rewards, updated_stacks, jnp.uint32(0)
+
+        final_rewards, final_stacks, final_pot = jax.lax.cond(
             should_terminate,
-            lambda: self._calculate_rewards(state_with_blinds),
-            lambda: jnp.zeros(self._num_players, dtype=jnp.float32),
+            lambda: calculate_terminal_state(),
+            lambda: (jnp.zeros(self._num_players, dtype=jnp.float32), state_with_blinds.stacks, state_with_blinds.pot),
         )
 
         # Create final state
-        final_state = state_with_blinds.replace(rewards=final_rewards)
+        final_state = state_with_blinds.replace(rewards=final_rewards, stacks=final_stacks, pot=final_pot)
 
         # Set legal actions (will be empty if terminated)
         legal_action_mask = self._get_legal_actions(final_state)
@@ -349,17 +356,23 @@ class UniversalPoker(core.Env):
         # Apply action
         new_state = self._apply_action(state, action)
 
-        # Check if game is terminated BEFORE advancing round/player (using pre-computed masks)
-        num_active = jnp.sum(new_state.active_mask)
+        # Check if game is terminated BEFORE advancing round/player
+        # Game terminates early only when all but one player have folded (not all-in)
+        num_not_folded = jnp.sum(~new_state.folded)
         betting_round_over = self._is_betting_round_over(new_state)
         in_last_betting_round = new_state.round == (self._num_rounds - 1)
-        terminated = (num_active <= 1) | (betting_round_over & in_last_betting_round)
+        terminated = (num_not_folded <= 1) | (betting_round_over & in_last_betting_round)
 
         # Combined function for terminated case: don't advance, calculate final rewards and legal actions
         def terminated_branch():
-            final_rewards = self._calculate_rewards(new_state)
+            terminal_winnings = self._calculate_terminal_winnings(new_state)
+            final_rewards = terminal_winnings.astype(jnp.float32) - (new_state.previous_round_bets + new_state.bets).astype(jnp.float32)
+            updated_stacks = new_state.stacks + terminal_winnings
             final_legal_actions = jnp.ones(3, dtype=jnp.bool_)
-            return new_state.replace(rewards=final_rewards, legal_action_mask=final_legal_actions)
+            # Reset pot to 0 since all chips have been distributed to players
+            return new_state.replace(
+                rewards=final_rewards, stacks=updated_stacks, pot=jnp.uint32(0), legal_action_mask=final_legal_actions
+            )
 
         # Combined function for active case: advance game, keep current rewards and legal actions
         def active_branch():
@@ -605,7 +618,7 @@ class UniversalPoker(core.Env):
 
             # --- 3. Calculate the Size of Each Pot Layer ---
             # Count eligible players for each layer
-            num_eligible_players = eligible_mask.sum(axis=0).astype(jnp.uint32)
+            num_eligible_players = eligible_mask.sum(axis=0, dtype=jnp.uint32)
             # Calculate the size of each pot layer
             pot_layer_sizes = level_increments * num_eligible_players
 
@@ -619,7 +632,7 @@ class UniversalPoker(core.Env):
 
             # --- 5. Distribute Winnings with Remainder Handling ---
             # Count winners for each pot to handle ties
-            num_winners_per_pot = is_winner_mask.sum(axis=0).astype(jnp.uint32)
+            num_winners_per_pot = is_winner_mask.sum(axis=0, dtype=jnp.uint32)
             # Avoid division by zero
             safe_num_winners = jnp.where(num_winners_per_pot > 0, num_winners_per_pot, jnp.uint32(1))
 
@@ -636,7 +649,7 @@ class UniversalPoker(core.Env):
 
             # For each pot layer, create a cumulative count of winners up to each player position
             # This will help us identify which winners should get remainder chips
-            winner_cumsum = jnp.cumsum(is_winner_mask, axis=0)
+            winner_cumsum = jnp.cumsum(is_winner_mask.astype(jnp.uint32), axis=0)
 
             # For each pot layer, a player gets a remainder chip if:
             # 1. They are a winner (is_winner_mask[player, pot] == True)
@@ -649,7 +662,7 @@ class UniversalPoker(core.Env):
             # Combine base winnings and remainder winnings
             total_winnings_matrix = base_winnings_matrix + remainder_winnings_matrix
             # Sum the winnings from all pot layers for each player
-            total_winnings = total_winnings_matrix.sum(axis=1)
+            total_winnings = total_winnings_matrix.sum(axis=1, dtype=jnp.uint32)
 
             # Return as uint32
             return total_winnings
@@ -664,8 +677,9 @@ class UniversalPoker(core.Env):
     def _calculate_rewards(self, state: State) -> Array:
         """Calculate final rewards for all players as net stack change."""
         terminal_winnings = self._calculate_terminal_winnings(state)
-        # Convert to float32 for final return
-        return terminal_winnings.astype(jnp.float32)
+        # Rewards = winnings - total contributions (net stack change)
+        net_stack_change = terminal_winnings.astype(jnp.float32) - (state.previous_round_bets + state.bets).astype(jnp.float32)
+        return net_stack_change
 
     @property
     def id(self) -> core.EnvId:

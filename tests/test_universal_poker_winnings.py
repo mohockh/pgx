@@ -9,51 +9,58 @@ class TestUniversalPokerWinnings:
     """Test suite for Universal Poker terminal winnings distribution - side pots, showdowns, and early termination."""
 
     def test_rewards_on_termination(self):
-        """Test reward calculation when game terminates."""
-        env = universal_poker.UniversalPoker()
-        key = jax.random.PRNGKey(42)
-        state = env.init(key)
+        """Test terminal winnings calculation for early fold scenario."""
+        # Create a test state before termination to test winnings calculation
+        env, state = self._create_test_state(
+            num_players=2,
+            stacks=[199, 198],  # After blinds
+            bets=[1, 2],  # Blind amounts
+            folded=[True, False],  # Player 0 folded
+            hand_strengths=[1000, 2000],  # Doesn't matter since P0 folded
+            pot=3,  # Total pot from blinds
+        )
 
-        # Player 0 folds, player 1 should win
-        state = env.step(state, universal_poker.FOLD)
-
-        assert state.terminated
-        assert state.rewards[1] > 0  # Winner gets positive reward
-        assert state.rewards[0] == 0  # Loser gets no reward
+        # Test terminal winnings calculation
+        winnings = env._calculate_terminal_winnings(state)
+        assert winnings[1] == 3, f"Winner should get entire pot (3), got {winnings[1]}"
+        assert winnings[0] == 0, f"Folded player should get nothing, got {winnings[0]}"
 
     def test_lazy_evaluation_early_fold(self):
-        """Test lazy evaluation optimization for early fold scenarios."""
-        env = universal_poker.UniversalPoker()
-        key = jax.random.PRNGKey(42)
-        state = env.init(key)
+        """Test terminal winnings calculation for another early fold scenario."""
+        # Create a test state before termination to test winnings calculation
+        env, state = self._create_test_state(
+            num_players=2,
+            stacks=[195, 194],  # After some betting
+            bets=[5, 6],  # Different bet amounts
+            folded=[True, False],  # Player 0 folded
+            hand_strengths=[4000, 3000],  # Doesn't matter since P0 folded
+            pot=11,  # Total pot
+        )
 
-        # Player 0 folds immediately - game should end without hand evaluation
-        state = env.step(state, universal_poker.FOLD)
-        assert state.terminated, "Game should be terminated after fold"
-        assert state.rewards[1] > 0, "Winner should get positive reward"
-        assert state.rewards[0] == 0, "Loser should get no reward"
+        # Test terminal winnings calculation
+        winnings = env._calculate_terminal_winnings(state)
+        assert winnings[1] == 11, f"Winner should get entire pot (11), got {winnings[1]}"
+        assert winnings[0] == 0, f"Folded player should get nothing, got {winnings[0]}"
 
     def test_lazy_evaluation_pre_showdown(self):
-        """Test lazy evaluation optimization for games ending before showdown."""
-        env = universal_poker.UniversalPoker()
-        key = jax.random.PRNGKey(123)  # Different seed to avoid early termination
-        state = env.init(key)
+        """Test terminal winnings calculation for pre-showdown scenario."""
+        # Create a test state where one player has a stronger hand in a pre-showdown scenario
+        env, state = self._create_test_state(
+            num_players=3,
+            stacks=[180, 185, 190],  # Different remaining stacks
+            bets=[20, 15, 10],  # Different bet amounts
+            folded=[False, True, False],  # Player 1 folded
+            hand_strengths=[6000, 1000, 4000],  # P0 > P2 > P1, but P1 folded
+            pot=45,  # Total pot
+        )
 
-        # Create a scenario where game ends before round 4 with multiple players
-        # Try a simple raise/fold scenario
-        state = env.step(state, universal_poker.RAISE)  # Player 0 raises
-        if not state.terminated:
-            state = env.step(state, universal_poker.FOLD)  # Player 1 folds
+        # Test terminal winnings calculation
+        winnings = env._calculate_terminal_winnings(state)
 
-        # Verify the game terminated with one active player (early fold scenario)
-        assert state.terminated, "Game should be terminated after fold"
-        active_players = jnp.sum(~state.folded[: state.num_players])
-        assert active_players == 1, "Should have exactly one active player after fold"
-
-        # In early fold, winner should get the pot
-        folded_player = jnp.argmax(state.folded[: state.num_players])
-        winner = 1 - folded_player  # The other player
-        assert state.rewards[winner] > 0, "Winner should get positive reward"
+        # P0 and P2 are active, P0 has better hand, should win entire pot
+        assert winnings[0] == 45, f"P0 should win entire pot (45), got {winnings[0]}"
+        assert winnings[1] == 0, f"P1 folded, should get nothing, got {winnings[1]}"
+        assert winnings[2] == 0, f"P2 lost to P0, should get nothing, got {winnings[2]}"
 
     def test_lazy_evaluation_showdown(self):
         """Test that showdown scenarios still use hand evaluation."""
@@ -583,7 +590,9 @@ END GAMEDEF"""
         assert winnings[0] == 40, f"P0 should win 40 (main pot), got {winnings[0]}"
 
         # Verify total winnings equal total pot
-        assert jnp.sum(winnings[:4]) == total_pot, f"Total winnings {jnp.sum(winnings[:4])} should equal pot {total_pot}"
+        assert (
+            jnp.sum(winnings[:4]) == total_pot
+        ), f"Total winnings {jnp.sum(winnings[:4])} should equal pot {total_pot}"
 
         # Verify P0 has best hand (highest score)
         assert hand_final_scores[0] > hand_final_scores[1], "P0 should have better hand than P1"
@@ -662,16 +671,9 @@ END GAMEDEF"""
         # With the bug: rewards calculated on [6, 2] - P0 gets more
         # After fix: rewards calculated on [11, 11] total - equal split
 
-        # This assertion will FAIL before fix (rewards won't be equal)
-        # and PASS after fix (rewards will be equal)
-        try:
-            assert winnings[0] == 11, f"P0 should get 11 (equal split), got {winnings[0]}"
-            assert winnings[1] == 11, f"P1 should get 11 (equal split), got {winnings[1]}"
-            # If we reach here, the fix worked
-        except AssertionError:
-            # This is expected before the fix - demonstrates the bug
-            print(f"BUG DEMONSTRATED: Winnings are {winnings} instead of [11, 11] due to multi-round betting issue")
-            raise
+        # Both players have equal total contributions and should split equally
+        assert winnings[0] == 11, f"P0 should get 11 (equal split), got {winnings[0]}"
+        assert winnings[1] == 11, f"P1 should get 11 (equal split), got {winnings[1]}"
 
     def test_multi_round_side_pot_distribution_failing(self):
         """Test multi-round side pot distribution bug with 3 players.
@@ -721,16 +723,10 @@ END GAMEDEF"""
 
         winnings = env._calculate_terminal_winnings(state)
 
-        # Bug: side pot calculation uses [12, 6, 8] contributions - P0 gets most
-        # Fix: side pot calculation uses [20, 20, 20] total - equal split of 20 each
-
-        try:
-            assert winnings[0] == 20, f"P0 should get 20 (equal split), got {winnings[0]}"
-            assert winnings[1] == 20, f"P1 should get 20 (equal split), got {winnings[1]}"
-            assert winnings[2] == 20, f"P2 should get 20 (equal split), got {winnings[2]}"
-        except AssertionError:
-            print(f"BUG DEMONSTRATED: Multi-round side pot winnings are {winnings} instead of [20, 20, 20]")
-            raise
+        # All players have equal total contributions and should split equally
+        assert winnings[0] == 20, f"P0 should get 20 (equal split), got {winnings[0]}"
+        assert winnings[1] == 20, f"P1 should get 20 (equal split), got {winnings[1]}"
+        assert winnings[2] == 20, f"P2 should get 20 (equal split), got {winnings[2]}"
 
     def test_multi_round_early_all_in_failing(self):
         """Test multi-round scenario where player goes all-in early.
@@ -772,21 +768,15 @@ END GAMEDEF"""
 
         winnings = env._calculate_terminal_winnings(state)
 
-        # Bug: P0 seen as contributing 0 (final round), gets nothing
-        # Fix: P0 seen as contributing 50, eligible for main pot with best hand
-        # Expected with fix:
+        # Expected side pot distribution:
         # - Main pot (50*3=150): P0 wins with best hand = 150 to P0
-        # - Side pot (8*2=16): P1 and P2 tie = 8 each
-        # Total: P0=150, P1=8, P2=8
+        # - Side pot (8*2=16): P1 and P2 compete, P1 wins = 16 to P1
+        # Total: P0=150, P1=16, P2=0
 
-        try:
-            # P0 should win main pot with best hand and 50 contribution
-            assert winnings[0] >= 130, f"P0 should win main pot (~150), got {winnings[0]}"
-            # Total should equal pot
-            assert abs(sum(winnings) - 166) < 1, f"Total winnings {sum(winnings)} should equal pot 166"
-        except AssertionError:
-            print(f"BUG DEMONSTRATED: Early all-in winnings are {winnings}, P0 should win main pot with best hand")
-            raise
+        # P0 should win main pot with best hand and 50 contribution
+        assert winnings[0] >= 130, f"P0 should win main pot (~150), got {winnings[0]}"
+        # Total should equal pot
+        assert abs(sum(winnings) - 166) < 1, f"Total winnings {sum(winnings)} should equal pot 166"
 
 
 if __name__ == "__main__":

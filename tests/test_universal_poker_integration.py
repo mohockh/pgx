@@ -465,7 +465,8 @@ END GAMEDEF"""
         # Player 1 raises all-in (should use remaining chips to go to 15)
         state = env.step(state, universal_poker.RAISE)  # Player 1 all-in with 15
         assert state.all_in[1] == True, "Player 1 should be all-in"
-        assert state.bets[1] == 15, "Player 1 should have bet all 15 chips"
+        total_contribution = state.previous_round_bets[1] + state.bets[1]
+        assert total_contribution == 15, f"Player 1 should have contributed 15 chips, got {total_contribution}"
 
         # Player 2 calls to match Player 1's all-in
         state = env.step(state, universal_poker.CALL)  # Player 2 calls to 15
@@ -496,7 +497,8 @@ END GAMEDEF"""
 
         assert state.all_in[0] == True, "Player 0 should be all-in"
         assert state.stacks[0] == 0, "Player 0 should have 0 chips left"
-        assert state.bets[0] == 15, "Player 0 should have bet all chips (15)"
+        total_contribution = state.previous_round_bets[0] + state.bets[0]
+        assert total_contribution == 15, f"Player 0 should have contributed all chips (15), got {total_contribution}"
         # The raise should be allowed even though it's less than full minimum raise amount
 
     def test_betting_edge_case_dead_money_preservation(self):

@@ -18,8 +18,8 @@ class TestUniversalPokerRewards:
         state = env.step(state, universal_poker.FOLD)
 
         assert state.terminated
-        assert state.rewards[1] > 0  # Winner gets positive reward
-        assert state.rewards[0] == 0  # Loser gets no reward
+        assert state.rewards[1] > 0  # Winner gets positive reward (net stack gain)
+        assert state.rewards[0] < 0  # Loser gets negative reward (net stack loss from blind)
 
     def test_lazy_evaluation_early_fold(self):
         """Test lazy evaluation optimization for early fold scenarios."""
@@ -30,8 +30,8 @@ class TestUniversalPokerRewards:
         # Player 0 folds immediately - game should end without hand evaluation
         state = env.step(state, universal_poker.FOLD)
         assert state.terminated, "Game should be terminated after fold"
-        assert state.rewards[1] > 0, "Winner should get positive reward"
-        assert state.rewards[0] == 0, "Loser should get no reward"
+        assert state.rewards[1] > 0, "Winner should get positive reward (net stack gain)"
+        assert state.rewards[0] < 0, "Loser should get negative reward (net stack loss from blind)"
 
     def test_lazy_evaluation_pre_showdown(self):
         """Test lazy evaluation optimization for games ending before showdown."""
@@ -53,7 +53,7 @@ class TestUniversalPokerRewards:
         # In early fold, winner should get the pot
         folded_player = jnp.argmax(state.folded[: state.num_players])
         winner = 1 - folded_player  # The other player
-        assert state.rewards[winner] > 0, "Winner should get positive reward"
+        assert state.rewards[winner] > 0, "Winner should get positive reward (net stack gain)"
 
     def test_lazy_evaluation_showdown(self):
         """Test that showdown scenarios still use hand evaluation."""
@@ -137,9 +137,9 @@ END GAMEDEF"""
 
         rewards = env._calculate_rewards(state)
 
-        # Should split pot equally: 50 each
-        assert rewards[0] == 50.0, f"P0 should get 50, got {rewards[0]}"
-        assert rewards[1] == 50.0, f"P1 should get 50, got {rewards[1]}"
+        # Should split pot equally - both break even (won 50, contributed 50 = net 0)
+        assert rewards[0] == 0.0, f"P0 should break even, got {rewards[0]}"
+        assert rewards[1] == 0.0, f"P1 should break even, got {rewards[1]}"
 
     def test_three_player_unequal_side_pots(self):
         """Test three players with unequal contributions creating multiple side pots."""
@@ -157,11 +157,13 @@ END GAMEDEF"""
         # Layer 1 (0-10): 10 * 3 = 30 chips, P0 wins (best hand among all)
         # Layer 2 (10-30): 20 * 2 = 40 chips, P1 wins (best hand among P1,P2)
         # Layer 3 (30-50): 20 * 1 = 20 chips, P2 wins (only eligible player)
-        # Total: P0=30, P1=40, P2=20
+        # Pot shares: P0=30, P1=40, P2=20
+        # Contributions: P0=10, P1=30, P2=50
+        # Net stack change: P0=20, P1=10, P2=-30
 
-        assert rewards[0] == 30.0, f"P0 should get 30, got {rewards[0]}"
-        assert rewards[1] == 40.0, f"P1 should get 40, got {rewards[1]}"
-        assert rewards[2] == 20.0, f"P2 should get 20, got {rewards[2]}"
+        assert rewards[0] == 20.0, f"P0 should get net +20, got {rewards[0]}"
+        assert rewards[1] == 10.0, f"P1 should get net +10, got {rewards[1]}"
+        assert rewards[2] == -30.0, f"P2 should get net -30, got {rewards[2]}"
 
     def test_three_player_tied_hands_in_side_pot(self):
         """Test tie within a specific side pot layer."""
@@ -178,11 +180,13 @@ END GAMEDEF"""
         # Side pot calculation:
         # Layer 1 (0-10): 10 * 3 = 30 chips, P1 and P2 tie -> 15 each
         # Layer 2 (10-30): 20 * 2 = 40 chips, P1 and P2 tie -> 20 each
-        # Total: P0=0, P1=35, P2=35
+        # Pot shares: P0=0, P1=35, P2=35
+        # Contributions: P0=10, P1=30, P2=30
+        # Net stack change: P0=-10, P1=5, P2=5
 
-        assert rewards[0] == 0.0, f"P0 should get 0, got {rewards[0]}"
-        assert rewards[1] == 35.0, f"P1 should get 35, got {rewards[1]}"
-        assert rewards[2] == 35.0, f"P2 should get 35, got {rewards[2]}"
+        assert rewards[0] == -10.0, f"P0 should get net -10, got {rewards[0]}"
+        assert rewards[1] == 5.0, f"P1 should get net +5, got {rewards[1]}"
+        assert rewards[2] == 5.0, f"P2 should get net +5, got {rewards[2]}"
 
     def test_four_player_complex_side_pots(self):
         """Test complex 4-player scenario with multiple side pots and ties."""
@@ -201,12 +205,14 @@ END GAMEDEF"""
         # Layer 2 (5-15): 10 * 3 = 30 chips, P2 wins (best among P1,P2,P3) -> 30
         # Layer 3 (15-25): 10 * 2 = 20 chips, P2 wins (best among P2,P3) -> 20
         # Layer 4 (25-40): 15 * 1 = 15 chips, P3 wins (only eligible) -> 15
-        # Total: P0=0, P1=0, P2=70, P3=15
+        # Pot shares: P0=0, P1=0, P2=70, P3=15
+        # Contributions: P0=5, P1=15, P2=25, P3=40
+        # Net stack change: P0=-5, P1=-15, P2=45, P3=-25
 
-        assert rewards[0] == 0.0, f"P0 should get 0, got {rewards[0]}"
-        assert rewards[1] == 0.0, f"P1 should get 0, got {rewards[1]}"
-        assert rewards[2] == 70.0, f"P2 should get 70, got {rewards[2]}"
-        assert rewards[3] == 15.0, f"P3 should get 15, got {rewards[3]}"
+        assert rewards[0] == -5.0, f"P0 should get net -5, got {rewards[0]}"
+        assert rewards[1] == -15.0, f"P1 should get net -15, got {rewards[1]}"
+        assert rewards[2] == 45.0, f"P2 should get net +45, got {rewards[2]}"
+        assert rewards[3] == -25.0, f"P3 should get net -25, got {rewards[3]}"
 
     def test_one_player_folded_side_pots(self):
         """Test side pot distribution when one player is folded."""
@@ -226,11 +232,13 @@ END GAMEDEF"""
         # Layer 1 (0-20): 20 * 3 = 60 chips, P2 wins (best among active) -> 60
         # Layer 2 (20-30): 10 * 2 = 20 chips, P2 wins (best among active) -> 20
         # Layer 3 (30-40): 10 * 1 = 10 chips, P2 wins (only one eligible) -> 10
-        # Total: P0=0, P1=0 (folded), P2=90
+        # Pot shares: P0=0, P1=0 (folded), P2=90
+        # Contributions: P0=20, P1=30, P2=40
+        # Net stack change: P0=-20, P1=-30, P2=50
 
-        assert rewards[0] == 0.0, f"P0 should get 0, got {rewards[0]}"
-        assert rewards[1] == 0.0, f"P1 should get 0 (folded), got {rewards[1]}"
-        assert rewards[2] == 90.0, f"P2 should get 90 (entire pot), got {rewards[2]}"
+        assert rewards[0] == -20.0, f"P0 should get net -20, got {rewards[0]}"
+        assert rewards[1] == -30.0, f"P1 should get net -30 (folded), got {rewards[1]}"
+        assert rewards[2] == 50.0, f"P2 should get net +50, got {rewards[2]}"
 
     def test_zero_contribution_player(self):
         """Test when one player has zero contribution."""
@@ -247,11 +255,13 @@ END GAMEDEF"""
         # Side pot calculation:
         # P0 contributed 0, so not eligible for any pot layers
         # Layer 1 (0-25): 25 * 2 = 50 chips, P1 wins (best among eligible)
-        # Total: P0=0, P1=50, P2=0
+        # Pot shares: P0=0, P1=50, P2=0
+        # Contributions: P0=0, P1=25, P2=25
+        # Net stack change: P0=0, P1=25, P2=-25
 
         assert rewards[0] == 0.0, f"P0 should get 0 (no contribution), got {rewards[0]}"
-        assert rewards[1] == 50.0, f"P1 should get 50, got {rewards[1]}"
-        assert rewards[2] == 0.0, f"P2 should get 0, got {rewards[2]}"
+        assert rewards[1] == 25.0, f"P1 should get net +25, got {rewards[1]}"
+        assert rewards[2] == -25.0, f"P2 should get net -25, got {rewards[2]}"
 
     def test_all_equal_contributions_tied_hands(self):
         """Test all players contribute equally with all hands tied."""
@@ -266,7 +276,9 @@ END GAMEDEF"""
         rewards = env._calculate_rewards(state)
 
         # Single side pot: 25 * 4 = 100, split 4 ways = 25 each
-        assert all(r == 25.0 for r in rewards), f"All should get 25, got {rewards}"
+        # Pot shares: all get 25, Contributions: all put in 25
+        # Net stack change: all break even (25 - 25 = 0)
+        assert all(r == 0.0 for r in rewards), f"All should break even, got {rewards}"
 
     def test_single_chip_side_pots(self):
         """Test side pots with very small chip amounts."""
@@ -284,11 +296,13 @@ END GAMEDEF"""
         # Layer 1 (0-1): 1 * 3 = 3 chips, P0 wins (best among all) -> 3
         # Layer 2 (1-2): 1 * 2 = 2 chips, P1 wins (best among P1,P2) -> 2
         # Layer 3 (2-3): 1 * 1 = 1 chip, P2 wins (only eligible) -> 1
-        # Total: P0=3, P1=2, P2=1
+        # Pot shares: P0=3, P1=2, P2=1
+        # Contributions: P0=1, P1=2, P2=3
+        # Net stack change: P0=2, P1=0, P2=-2
 
-        assert rewards[0] == 3.0, f"P0 should get 3, got {rewards[0]}"
-        assert rewards[1] == 2.0, f"P1 should get 2, got {rewards[1]}"
-        assert rewards[2] == 1.0, f"P2 should get 1, got {rewards[2]}"
+        assert rewards[0] == 2.0, f"P0 should get net +2, got {rewards[0]}"
+        assert rewards[1] == 0.0, f"P1 should break even, got {rewards[1]}"
+        assert rewards[2] == -2.0, f"P2 should get net -2, got {rewards[2]}"
 
     def test_maximum_players_side_pots(self):
         """Test side pots with maximum number of players (stress test)."""
@@ -305,8 +319,12 @@ END GAMEDEF"""
 
         # P5 has best hand and highest contribution, should win everything
         total_pot = sum([10, 20, 30, 40, 50, 60])
-        assert rewards[5] == float(total_pot), f"P5 should get {total_pot}, got {rewards[5]}"
-        assert all(r == 0.0 for r in rewards[:5]), f"Others should get 0, got {rewards[:5]}"
+        # P5 wins entire pot (210) but contributed 60 -> net +150
+        # Others contributed their amounts but won 0 -> net negative of their contributions
+        assert rewards[5] == 150.0, f"P5 should get net +150, got {rewards[5]}"
+        expected_losses = [-10.0, -20.0, -30.0, -40.0, -50.0]
+        for i, expected_loss in enumerate(expected_losses):
+            assert rewards[i] == expected_loss, f"P{i} should get net {expected_loss}, got {rewards[i]}"
 
     def test_integer_division_remainders(self):
         """Test side pot distribution with integer division remainders."""
@@ -320,8 +338,9 @@ END GAMEDEF"""
 
         rewards = env._calculate_rewards(state)
 
-        # Perfect division: 30 / 3 = 10 each
-        assert all(r == 10.0 for r in rewards), f"All should get 10, got {rewards}"
+        # Perfect division: 30 / 3 = 10 each, but contributed 10 each
+        # Net stack change: all break even (10 - 10 = 0)
+        assert all(r == 0.0 for r in rewards), f"All should break even, got {rewards}"
 
         # Now test with remainder
         env2, state2 = self._create_test_state(
@@ -333,7 +352,8 @@ END GAMEDEF"""
         )
 
         rewards2 = env2._calculate_rewards(state2)
-        assert all(r == 11.0 for r in rewards2), f"All should get 11, got {rewards2}"
+        # Each wins 11, each contributed 11 -> all break even
+        assert all(r == 0.0 for r in rewards2), f"All should break even, got {rewards2}"
 
     def test_edge_case_empty_side_pot_layers(self):
         """Test when pot layer increments might be zero."""
@@ -350,12 +370,14 @@ END GAMEDEF"""
         # Side pot calculation:
         # Layer 1 (0-10): 10 * 4 = 40 chips, P0 wins (best among all) -> 40
         # Layer 2 (10-20): 10 * 2 = 20 chips, P2 wins (best among P2,P3) -> 20
-        # Total: P0=40, P1=0, P2=20, P3=0
+        # Pot shares: P0=40, P1=0, P2=20, P3=0
+        # Contributions: P0=10, P1=10, P2=20, P3=20
+        # Net stack change: P0=30, P1=-10, P2=0, P3=-20
 
-        assert rewards[0] == 40.0, f"P0 should get 40, got {rewards[0]}"
-        assert rewards[1] == 0.0, f"P1 should get 0, got {rewards[1]}"
-        assert rewards[2] == 20.0, f"P2 should get 20, got {rewards[2]}"
-        assert rewards[3] == 0.0, f"P3 should get 0, got {rewards[3]}"
+        assert rewards[0] == 30.0, f"P0 should get net +30, got {rewards[0]}"
+        assert rewards[1] == -10.0, f"P1 should get net -10, got {rewards[1]}"
+        assert rewards[2] == 0.0, f"P2 should break even, got {rewards[2]}"
+        assert rewards[3] == -20.0, f"P3 should get net -20, got {rewards[3]}"
 
     def test_massive_pot_layers_stress_test(self):
         """Test with many different contribution levels (stress test for algorithm)."""
@@ -371,12 +393,12 @@ END GAMEDEF"""
         rewards = env._calculate_rewards(state)
 
         # P0 has best hand and should win lower layers, but P7 contributed most
-        # Complex calculation, but total should equal pot
-        total_pot = sum([1, 5, 10, 15, 20, 25, 30, 100])
-        assert abs(sum(rewards) - total_pot) < 0.01, f"Total rewards {sum(rewards)} should equal pot {total_pot}"
+        # Complex calculation, but net stack changes should sum to zero
+        assert abs(sum(rewards)) < 0.01, f"Total net stack changes {sum(rewards)} should sum to zero"
 
         # P0 should get something (has best hand for some layers)
-        assert rewards[0] > 0, f"P0 should get something, got {rewards[0]}"
+        # Even though they contributed least (1), they should win some layers
+        assert rewards[0] > 0, f"P0 should have net positive, got {rewards[0]}"
 
     def test_three_way_tie_side_pot(self):
         """Test three-way tie in a side pot."""
@@ -392,17 +414,18 @@ END GAMEDEF"""
 
         # Layer 1 (0-20): All 4 eligible, 20*4=80 chips, P0,P1,P2 tie -> 80//3=26 each + 2 remainder chips to P0,P1
         # Layer 2 (20-30): P3 only, 10*1=10 chips, P3 wins -> 10
-        # Total: P0=27, P1=27, P2=26, P3=10 (Total=90, no chips lost)
+        # Pot shares: P0=27, P1=27, P2=26, P3=10
+        # Contributions: P0=20, P1=20, P2=20, P3=30
+        # Net stack change: P0=7, P1=7, P2=6, P3=-20
 
         # Check remainder distribution - first two winners get extra chip
-        assert rewards[0] == 27.0, f"P0 should get 27 (26+1 remainder), got {rewards[0]}"
-        assert rewards[1] == 27.0, f"P1 should get 27 (26+1 remainder), got {rewards[1]}"
-        assert rewards[2] == 26.0, f"P2 should get 26 (26+0 remainder), got {rewards[2]}"
-        assert rewards[3] == 10.0, f"P3 should get 10, got {rewards[3]}"
+        assert rewards[0] == 7.0, f"P0 should get net +7, got {rewards[0]}"
+        assert rewards[1] == 7.0, f"P1 should get net +7, got {rewards[1]}"
+        assert rewards[2] == 6.0, f"P2 should get net +6, got {rewards[2]}"
+        assert rewards[3] == -20.0, f"P3 should get net -20, got {rewards[3]}"
 
-        # Total should equal the full pot (no chips lost to rounding)
-        expected_total = 90.0  # 27+27+26+10
-        assert abs(sum(rewards) - expected_total) < 0.01, f"Total rewards should be {expected_total}"
+        # Net stack changes should sum to zero
+        assert abs(sum(rewards)) < 0.01, f"Total net stack changes should sum to zero"
 
     def test_partial_contribution_with_ties(self):
         """Test partial contributions with tied hands."""
@@ -421,14 +444,18 @@ END GAMEDEF"""
         # Layer 2 (5-10): 20 chips ÷ 2 = 10 each → P2=10, P3=10
         # Layer 3 (10-15): 15 chips ÷ 2 = 7 + 1 remainder to P2 → P2=8, P3=7
         # Layer 4 (15-20): P4 only gets 5
-        # Total: P2=31 (13+10+8), P3=29 (12+10+7), P4=5
-        assert rewards[2] == 31.0, f"P2 should get 31 (gets remainders), got {rewards[2]}"
-        assert rewards[3] == 29.0, f"P3 should get 29, got {rewards[3]}"
+        # Pot shares: P2=31 (13+10+8), P3=29 (12+10+7), P4=5
+        # Contributions: P0=5, P1=10, P2=15, P3=15, P4=20
+        # Net stack change: P0=-5, P1=-10, P2=16 (31-15), P3=14 (29-15), P4=-15 (5-20)
+        assert rewards[0] == -5.0, f"P0 should get net -5, got {rewards[0]}"
+        assert rewards[1] == -10.0, f"P1 should get net -10, got {rewards[1]}"
+        assert rewards[2] == 16.0, f"P2 should get net +16, got {rewards[2]}"
+        assert rewards[3] == 14.0, f"P3 should get net +14, got {rewards[3]}"
+        assert rewards[4] == -15.0, f"P4 should get net -15, got {rewards[4]}"
 
-        # Total should equal the full pot (no chips lost with remainder distribution)
-        total_pot = sum([5, 10, 15, 15, 20])  # 65
+        # Net stack changes should sum to zero
         reward_sum = sum(rewards)
-        assert abs(reward_sum - total_pot) < 0.01, f"Rewards {reward_sum} should equal pot {total_pot}"
+        assert abs(reward_sum) < 0.01, f"Total net stack changes should sum to zero, got {reward_sum}"
 
     def test_boundary_hand_strength_values(self):
         """Test with boundary hand strength values (0, max uint32)."""
@@ -443,12 +470,20 @@ END GAMEDEF"""
         rewards = env._calculate_rewards(state)
 
         # P1 has maximum possible hand strength, should win everything they're eligible for
-        assert rewards[1] > 0, f"P1 should win something, got {rewards[1]}"
+        # Contributions: P0=10, P1=20, P2=30, total pot=60
+        # Side pot layers:
+        # Layer 1 (0->10): 30 chips, P1 wins all 30
+        # Layer 2 (10->20): 20 chips, P1 wins all 20
+        # Layer 3 (20->30): 10 chips, P2 gets 10 (only P2 eligible)
+        # Pot shares: P0=0, P1=50, P2=10
+        # Net stack change: P0=-10, P1=30 (50-20), P2=-20 (10-30)
+        assert rewards[1] == 30.0, f"P1 should get net +30, got {rewards[1]}"
+        assert rewards[0] == -10.0, f"P0 should get net -10, got {rewards[0]}"
+        assert rewards[2] == -20.0, f"P2 should get net -20, got {rewards[2]}"
 
-        # Total should be close to pot (may have small losses due to integer division)
-        total_pot = 60
+        # Net stack changes should sum to zero
         reward_sum = sum(rewards)
-        assert reward_sum == total_pot, f"Rewards {reward_sum} should not exceed pot {total_pot}"
+        assert abs(reward_sum) < 0.01, f"Total net stack changes should sum to zero, got {reward_sum}"
 
     def test_chip_remainder_distribution(self):
         """Test chip remainder distribution with 4 players where 3 call, big blind folds."""
@@ -472,13 +507,17 @@ END GAMEDEF"""
         # Expected distribution with remainder allocation:
         # 8 chips, 3 active players: 8 // 3 = 2 each, remainder = 2
         # Remainder goes to first two active players in position order: P0 and P2
-        assert rewards[0] == 3.0, f"P0 should get 3 (2 + 1 remainder), got {rewards[0]}"
-        assert rewards[1] == 0.0, f"P1 should get 0 (folded), got {rewards[1]}"
-        assert rewards[2] == 3.0, f"P2 should get 3 (2 + 1 remainder), got {rewards[2]}"
-        assert rewards[3] == 2.0, f"P3 should get 2 (no remainder), got {rewards[3]}"
+        # Pot shares: P0=3, P1=0 (folded), P2=3, P3=2
+        # Contributions: P0=2, P1=2, P2=2, P3=2
+        # Net stack change: P0=1 (3-2), P1=-2 (0-2), P2=1 (3-2), P3=0 (2-2)
+        assert rewards[0] == 1.0, f"P0 should get net +1, got {rewards[0]}"
+        assert rewards[1] == -2.0, f"P1 should get net -2 (folded), got {rewards[1]}"
+        assert rewards[2] == 1.0, f"P2 should get net +1, got {rewards[2]}"
+        assert rewards[3] == 0.0, f"P3 should get net 0, got {rewards[3]}"
 
-        # Verify total chips are conserved
-        assert sum(rewards) == 8.0, f"Total rewards {sum(rewards)} should equal pot 8"
+        # Net stack changes should sum to zero
+        reward_sum = sum(rewards)
+        assert abs(reward_sum) < 0.01, f"Total net stack changes should sum to zero, got {reward_sum}"
 
     # Complex side pot test from main test file
     def test_side_pot_distribution(self):
@@ -568,32 +607,32 @@ END GAMEDEF"""
         # Layer 3 (20->30): 2 eligible players (P2,P3), P2 wins (Aces and 8s > Aces and 5s) = 10*2 = 20 to P2
         # Layer 4 (30->50): 1 eligible player (P3), P3 wins = 20*1 = 20 to P3
         #
-        # Expected final amounts:
-        # P0: 40 (wins main pot with quads)
-        # P1: 15 (ties for side pot 2 with P2)
-        # P2: 35 (15 from side pot 2 tie + 20 from side pot 3)
-        # P3: 20 (wins final side pot 4 uncontested)
+        # Pot shares: P0=40, P1=15, P2=35 (15+20), P3=20
+        # Contributions: P0=10, P1=20, P2=30, P3=50
+        # Net stack change: P0=30 (40-10), P1=-5 (15-20), P2=5 (35-30), P3=-30 (20-50)
 
         print(f"Hand scores: {hand_final_scores[:4]}")
         print(f"Contributions (bets): {final_bets[:4]}")
         print(f"Rewards: {rewards[:4]}")
         print(f"Total distributed: {jnp.sum(rewards[:4])}")
 
-        # Verify P0 gets main pot with best hand
-        assert rewards[0] == 40, f"P0 should win 40 (main pot), got {rewards[0]}"
+        # Verify net stack changes
+        assert rewards[0] == 30.0, f"P0 should get net +30, got {rewards[0]}"
+        assert rewards[1] == -5.0, f"P1 should get net -5, got {rewards[1]}"
+        assert rewards[2] == 5.0, f"P2 should get net +5, got {rewards[2]}"
+        assert rewards[3] == -30.0, f"P3 should get net -30, got {rewards[3]}"
 
-        # Verify total rewards equal total pot
-        assert jnp.sum(rewards[:4]) == total_pot, f"Total rewards {jnp.sum(rewards[:4])} should equal pot {total_pot}"
+        # Net stack changes should sum to zero
+        reward_sum = jnp.sum(rewards[:4])
+        assert abs(reward_sum) < 0.01, f"Total net stack changes should sum to zero, got {reward_sum}"
 
         # Verify P0 has best hand (highest score)
         assert hand_final_scores[0] > hand_final_scores[1], "P0 should have better hand than P1"
         assert hand_final_scores[0] > hand_final_scores[2], "P0 should have better hand than P2"
         assert hand_final_scores[0] > hand_final_scores[3], "P0 should have better hand than P3"
 
-        # Verify side pot distribution based on actual hand strengths
-        assert rewards[1] == 15, f"P1 should get 15 from tied side pot, got {rewards[1]}"
-        assert rewards[2] == 35, f"P2 should get 35 (15+20 from multiple pots), got {rewards[2]}"
-        assert rewards[3] == 20, f"P3 should get 20 from uncontested final side pot, got {rewards[3]}"
+        # The above assertions already check the net stack changes correctly
+        # Removing duplicate assertions that were still using pot share expectations
 
         # Verify hand strengths match expected pattern
         # P1 and P2 have same hand strength (Aces and 8s), P3 has weaker (Aces and 5s), P0 has quads
@@ -643,13 +682,7 @@ END GAMEDEF"""
 
         rewards = env._calculate_rewards(state)
 
-        # With the bug: rewards calculated on [4, 4] contributions (final round only)
-        # Both appear equal, so should split: 11 each
-        # After fix: rewards calculated on [11, 11] total contributions
-        # Both should get 11.0 (equal split) - same result but for correct reason
-
-        # This test demonstrates the bug in a different scenario - let's make contributions unequal
-        # Change to: P0 final round = 6, P1 final round = 2, but equal total contributions
+        # Test scenario with unequal final round bets but equal total contributions
         state = state.replace(
             bets=jnp.array([6, 2], dtype=jnp.uint32),  # Unequal final round bets
             previous_round_bets=jnp.array([5, 9], dtype=jnp.uint32),  # Previous rounds: P0=5, P1=9
@@ -659,19 +692,11 @@ END GAMEDEF"""
 
         rewards = env._calculate_rewards(state)
 
-        # With the bug: rewards calculated on [6, 2] - P0 gets more
-        # After fix: rewards calculated on [11, 11] total - equal split
-
-        # This assertion will FAIL before fix (rewards won't be equal)
-        # and PASS after fix (rewards will be equal)
-        try:
-            assert rewards[0] == 11.0, f"P0 should get 11 (equal split), got {rewards[0]}"
-            assert rewards[1] == 11.0, f"P1 should get 11 (equal split), got {rewards[1]}"
-            # If we reach here, the fix worked
-        except AssertionError:
-            # This is expected before the fix - demonstrates the bug
-            print(f"BUG DEMONSTRATED: Rewards are {rewards} instead of [11.0, 11.0] due to multi-round betting issue")
-            raise
+        # Total contributions are [11, 11] (equal), tied hands
+        # Pot shares: [11, 11] (equal split)
+        # Net stack change: [11-11, 11-11] = [0, 0] (both break even)
+        assert rewards[0] == 0.0, f"P0 should get net 0 (break even), got {rewards[0]}"
+        assert rewards[1] == 0.0, f"P1 should get net 0 (break even), got {rewards[1]}"
 
     def test_multi_round_side_pot_distribution_failing(self):
         """Test multi-round side pot distribution bug with 3 players.
@@ -721,16 +746,12 @@ END GAMEDEF"""
 
         rewards = env._calculate_rewards(state)
 
-        # Bug: side pot calculation uses [12, 6, 8] contributions - P0 gets most
-        # Fix: side pot calculation uses [20, 20, 20] total - equal split of 20 each
-
-        try:
-            assert rewards[0] == 20.0, f"P0 should get 20 (equal split), got {rewards[0]}"
-            assert rewards[1] == 20.0, f"P1 should get 20 (equal split), got {rewards[1]}"
-            assert rewards[2] == 20.0, f"P2 should get 20 (equal split), got {rewards[2]}"
-        except AssertionError:
-            print(f"BUG DEMONSTRATED: Multi-round side pot rewards are {rewards} instead of [20.0, 20.0, 20.0]")
-            raise
+        # Total contributions are [20, 20, 20] (all equal)
+        # Pot shares with tied hands should be [20, 20, 20] (equal split)
+        # Net stack change: [20-20, 20-20, 20-20] = [0, 0, 0] (everyone breaks even)
+        assert rewards[0] == 0.0, f"P0 should get net 0 (break even), got {rewards[0]}"
+        assert rewards[1] == 0.0, f"P1 should get net 0 (break even), got {rewards[1]}"
+        assert rewards[2] == 0.0, f"P2 should get net 0 (break even), got {rewards[2]}"
 
     def test_multi_round_early_all_in_failing(self):
         """Test multi-round scenario where player goes all-in early.
@@ -772,21 +793,19 @@ END GAMEDEF"""
 
         rewards = env._calculate_rewards(state)
 
-        # Bug: P0 seen as contributing 0 (final round), gets nothing
-        # Fix: P0 seen as contributing 50, eligible for main pot with best hand
-        # Expected with fix:
-        # - Main pot (50*3=150): P0 wins with best hand = 150 to P0
-        # - Side pot (8*2=16): P1 and P2 tie = 8 each
-        # Total: P0=150, P1=8, P2=8
+        # Total contributions: P0=50, P1=58, P2=58
+        # Side pot calculation:
+        # Layer 1 (0->50): All 3 eligible, P0 best hand -> P0 gets 50*3=150
+        # Layer 2 (50->58): P1,P2 eligible, P1 better than P2 -> P1 gets all 8*2=16
+        # Pot shares: P0=150, P1=16, P2=0
+        # Net stack change: P0=100 (150-50), P1=-42 (16-58), P2=-58 (0-58)
 
-        try:
-            # P0 should win main pot with best hand and 50 contribution
-            assert rewards[0] >= 130.0, f"P0 should win main pot (~150), got {rewards[0]}"
-            # Total should equal pot
-            assert abs(sum(rewards) - 166.0) < 0.1, f"Total rewards {sum(rewards)} should equal pot 166"
-        except AssertionError:
-            print(f"BUG DEMONSTRATED: Early all-in rewards are {rewards}, P0 should win main pot with best hand")
-            raise
+        # P0 should get net +100 (won main pot minus contribution)
+        assert rewards[0] == 100.0, f"P0 should get net +100, got {rewards[0]}"
+        assert rewards[1] == -42.0, f"P1 should get net -42, got {rewards[1]}"
+        assert rewards[2] == -58.0, f"P2 should get net -58, got {rewards[2]}"
+        # Net stack changes should sum to zero
+        assert abs(sum(rewards)) < 0.01, f"Total net stack changes should sum to zero, got {sum(rewards)}"
 
 
 if __name__ == "__main__":
