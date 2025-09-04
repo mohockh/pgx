@@ -617,29 +617,46 @@ class UniversalPoker(core.Env):
             # Identify all players with the winning hand strength for each pot (eligible winners only)
             is_winner_mask = eligible_mask & (masked_strengths == max_strength_per_pot)
 
-            # --- 5. Distribute Winnings ---
+            # --- 5. Distribute Winnings with Remainder Handling ---
             # Count winners for each pot to handle ties
             num_winners_per_pot = is_winner_mask.sum(axis=0).astype(jnp.uint32)
             # Avoid division by zero
             safe_num_winners = jnp.where(num_winners_per_pot > 0, num_winners_per_pot, jnp.uint32(1))
-            # Calculate the payout per winner for each pot layer (integer division)
+
+            # Calculate the payout per winner and remainder for each pot layer
             payout_per_winner = pot_layer_sizes // safe_num_winners
-            # Distribute the pot layer amounts to the winners
-            winnings_matrix = jnp.where(is_winner_mask, payout_per_winner[jnp.newaxis, :], jnp.uint32(0))
+            remainders = pot_layer_sizes % safe_num_winners
+
+            # Distribute the base pot amounts to the winners
+            base_winnings_matrix = jnp.where(is_winner_mask, payout_per_winner[jnp.newaxis, :], jnp.uint32(0))
+
+            # Distribute remainder chips to winners in positional order (starting from position 0)
+            # Create a matrix where each row corresponds to a player and each column to a pot layer
+            # For each pot layer, we distribute remainder chips to the first N winners in positional order
+
+            # For each pot layer, create a cumulative count of winners up to each player position
+            # This will help us identify which winners should get remainder chips
+            winner_cumsum = jnp.cumsum(is_winner_mask, axis=0)
+
+            # For each pot layer, a player gets a remainder chip if:
+            # 1. They are a winner (is_winner_mask[player, pot] == True)
+            # 2. Their winner position (winner_cumsum[player, pot]) is <= remainders[pot]
+            gets_remainder_chip = is_winner_mask & (winner_cumsum <= remainders[jnp.newaxis, :])
+
+            # Convert boolean to uint32 for remainder winnings
+            remainder_winnings_matrix = gets_remainder_chip.astype(jnp.uint32)
+
+            # Combine base winnings and remainder winnings
+            total_winnings_matrix = base_winnings_matrix + remainder_winnings_matrix
             # Sum the winnings from all pot layers for each player
-            total_winnings = winnings_matrix.sum(axis=1)
+            total_winnings = total_winnings_matrix.sum(axis=1)
 
             # Convert to float32 for final return
             return total_winnings.astype(jnp.float32)
 
-        def equal_split_case():
-            equal_pot_share = jnp.float32(state.pot) / jnp.maximum(num_active, 1)
-            return jnp.where(active_mask, equal_pot_share, 0.0)
-
         # Calculate final rewards based on game state
-        final_rewards = jnp.where(
-            is_single_winner, single_winner_case(), jnp.where(is_showdown, side_pot_calculation(), equal_split_case())
-        )
+        # Only use single_winner_case or side_pot_calculation (no equal_split_case needed)
+        final_rewards = jnp.where(is_single_winner, single_winner_case(), side_pot_calculation())
 
         # Return rewards for all players - now properly sized
         return final_rewards

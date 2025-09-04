@@ -390,17 +390,18 @@ END GAMEDEF"""
 
         rewards = env._calculate_rewards(state)
 
-        # Layer 1 (0-20): All 4 eligible, 20*4=80 chips, P0,P1,P2 tie -> 80//3=26 each (2 chips lost to integer division)
+        # Layer 1 (0-20): All 4 eligible, 20*4=80 chips, P0,P1,P2 tie -> 80//3=26 each + 2 remainder chips to P0,P1
         # Layer 2 (20-30): P3 only, 10*1=10 chips, P3 wins -> 10
-        # Total: P0=26, P1=26, P2=26, P3=10 (Total=88, 2 chips lost to rounding)
+        # Total: P0=27, P1=27, P2=26, P3=10 (Total=90, no chips lost)
 
-        # Check that tied players get equal amounts
-        assert rewards[0] == rewards[1] == rewards[2], f"Tied players should get equal amounts: {rewards[:3]}"
-        assert rewards[0] == 26.0, f"Tied players should get 26, got {rewards[0]}"
+        # Check remainder distribution - first two winners get extra chip
+        assert rewards[0] == 27.0, f"P0 should get 27 (26+1 remainder), got {rewards[0]}"
+        assert rewards[1] == 27.0, f"P1 should get 27 (26+1 remainder), got {rewards[1]}"
+        assert rewards[2] == 26.0, f"P2 should get 26 (26+0 remainder), got {rewards[2]}"
         assert rewards[3] == 10.0, f"P3 should get 10, got {rewards[3]}"
 
-        # Total will be slightly less than pot due to integer division
-        expected_total = 88.0  # 26*3 + 10
+        # Total should equal the full pot (no chips lost to rounding)
+        expected_total = 90.0  # 27+27+26+10
         assert abs(sum(rewards) - expected_total) < 0.01, f"Total rewards should be {expected_total}"
 
     def test_partial_contribution_with_ties(self):
@@ -415,15 +416,19 @@ END GAMEDEF"""
 
         rewards = env._calculate_rewards(state)
 
-        # P2 and P3 have tied best hands, they should split winnings in layers they're eligible for
-        # Complex calculation but P2 and P3 should get equal amounts
-        assert rewards[2] == rewards[3], f"P2 and P3 should get equal amounts: P2={rewards[2]}, P3={rewards[3]}"
+        # P2 and P3 have tied best hands, they split winnings in layers with remainder going to P2 (lower position)
+        # Layer 1 (0-5): 25 chips ÷ 2 = 12 + 1 remainder to P2 → P2=13, P3=12
+        # Layer 2 (5-10): 20 chips ÷ 2 = 10 each → P2=10, P3=10
+        # Layer 3 (10-15): 15 chips ÷ 2 = 7 + 1 remainder to P2 → P2=8, P3=7
+        # Layer 4 (15-20): P4 only gets 5
+        # Total: P2=31 (13+10+8), P3=29 (12+10+7), P4=5
+        assert rewards[2] == 31.0, f"P2 should get 31 (gets remainders), got {rewards[2]}"
+        assert rewards[3] == 29.0, f"P3 should get 29, got {rewards[3]}"
 
-        # Total should be close to pot (may have small losses due to integer division)
-        total_pot = sum([5, 10, 15, 15, 20])
+        # Total should equal the full pot (no chips lost with remainder distribution)
+        total_pot = sum([5, 10, 15, 15, 20])  # 65
         reward_sum = sum(rewards)
-        assert reward_sum <= total_pot, f"Rewards {reward_sum} should not exceed pot {total_pot}"
-        assert reward_sum >= total_pot - 10, f"Rewards {reward_sum} should be close to pot {total_pot}"
+        assert abs(reward_sum - total_pot) < 0.01, f"Rewards {reward_sum} should equal pot {total_pot}"
 
     def test_boundary_hand_strength_values(self):
         """Test with boundary hand strength values (0, max uint32)."""
@@ -443,8 +448,37 @@ END GAMEDEF"""
         # Total should be close to pot (may have small losses due to integer division)
         total_pot = 60
         reward_sum = sum(rewards)
-        assert reward_sum <= total_pot, f"Rewards {reward_sum} should not exceed pot {total_pot}"
-        assert reward_sum >= total_pot - 5, f"Rewards {reward_sum} should be close to pot {total_pot}"
+        assert reward_sum == total_pot, f"Rewards {reward_sum} should not exceed pot {total_pot}"
+
+    def test_chip_remainder_distribution(self):
+        """Test chip remainder distribution with 4 players where 3 call, big blind folds."""
+        # Setup scenario: 4 players, player 1 (big blind) = 2, others call 2 each, big blind folds
+        # Expected: Pot = 8 chips, 3 active players with equal hands
+        # Integer division: 8 // 3 = 2 chips each, 2 chips remainder
+        # Remainder should go to first two active players in order: P0 and P2 get +1 chip each
+        # Expected rewards: P0=3, P1=0 (folded), P2=3, P3=2
+
+        env, state = self._create_test_state(
+            num_players=4,
+            stacks=[0, 0, 0, 0],  # All all-in
+            bets=[2, 2, 2, 2],  # All called the big blind (2 chips each)
+            folded=[False, True, False, False],  # Big blind (P1) folded
+            hand_strengths=[5000, 0, 5000, 5000],  # P0, P2, P3 tied (P1 folded so hand doesn't matter)
+            pot=8,  # Total pot: 2+2+2+2 = 8 chips
+        )
+
+        rewards = env._calculate_rewards(state)
+
+        # Expected distribution with remainder allocation:
+        # 8 chips, 3 active players: 8 // 3 = 2 each, remainder = 2
+        # Remainder goes to first two active players in position order: P0 and P2
+        assert rewards[0] == 3.0, f"P0 should get 3 (2 + 1 remainder), got {rewards[0]}"
+        assert rewards[1] == 0.0, f"P1 should get 0 (folded), got {rewards[1]}"
+        assert rewards[2] == 3.0, f"P2 should get 3 (2 + 1 remainder), got {rewards[2]}"
+        assert rewards[3] == 2.0, f"P3 should get 2 (no remainder), got {rewards[3]}"
+
+        # Verify total chips are conserved
+        assert sum(rewards) == 8.0, f"Total rewards {sum(rewards)} should equal pot 8"
 
     # Complex side pot test from main test file
     def test_side_pot_distribution(self):
