@@ -558,8 +558,8 @@ class UniversalPoker(core.Env):
         # Return computed actions for current_player only
         return active_actions[current_player]
 
-    def _calculate_rewards(self, state: State) -> Array:
-        """Calculate final rewards for all players with proper side pot distribution."""
+    def _calculate_terminal_winnings(self, state: State) -> Array:
+        """Calculate terminal winnings for all players with proper side pot distribution."""
         # Get active players (not folded) - use pre-computed masks
         active_mask = ~state.folded & state.player_mask
         num_active = jnp.sum(active_mask)
@@ -571,8 +571,8 @@ class UniversalPoker(core.Env):
 
         def single_winner_case():
             single_winner_idx = jnp.argmax(active_mask)
-            rewards = jnp.zeros(self._num_players, dtype=jnp.float32)
-            return rewards.at[single_winner_idx].set(state.pot)
+            winnings = jnp.zeros(self._num_players, dtype=jnp.uint32)
+            return winnings.at[single_winner_idx].set(state.pot)
 
         def side_pot_calculation():
             # Use total contributions (previous rounds + current round) from ALL players - keep as uint32
@@ -651,15 +651,21 @@ class UniversalPoker(core.Env):
             # Sum the winnings from all pot layers for each player
             total_winnings = total_winnings_matrix.sum(axis=1)
 
-            # Convert to float32 for final return
-            return total_winnings.astype(jnp.float32)
+            # Return as uint32
+            return total_winnings
 
-        # Calculate final rewards based on game state
+        # Calculate final winnings based on game state
         # Only use single_winner_case or side_pot_calculation (no equal_split_case needed)
-        final_rewards = jnp.where(is_single_winner, single_winner_case(), side_pot_calculation())
+        final_winnings = jnp.where(is_single_winner, single_winner_case(), side_pot_calculation())
 
-        # Return rewards for all players - now properly sized
-        return final_rewards
+        # Return winnings for all players - now properly sized
+        return final_winnings
+
+    def _calculate_rewards(self, state: State) -> Array:
+        """Calculate final rewards for all players as net stack change."""
+        terminal_winnings = self._calculate_terminal_winnings(state)
+        # Convert to float32 for final return
+        return terminal_winnings.astype(jnp.float32)
 
     @property
     def id(self) -> core.EnvId:
