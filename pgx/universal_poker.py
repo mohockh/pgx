@@ -72,6 +72,104 @@ class State(core.State):
         return "universal_poker"
 
 
+class LimitPokerBettingStructure:
+    """Betting structure implementation for limit poker."""
+
+    def apply_action(self, env, state: State, action: int) -> State:
+        """Apply action using limit poker rules (only actions 0-2 are valid)."""
+        return env._apply_basic_action(state, action)
+
+    def get_legal_actions(self, env, state: State) -> Array:
+        """Get legal actions for limit poker (3 actions: fold, call, raise)."""
+        current_player = state.current_player
+
+        # Original 3-action limit logic
+        can_fold = ~(state.all_in | state.folded)
+        can_call = (state.bets <= state.max_bet) & (state.stacks > 0) & ~state.folded
+        total_chips = state.stacks + state.bets
+        can_raise = (total_chips > state.max_bet) & ~state.folded
+
+        active_actions = jnp.column_stack([can_fold, can_call, can_raise])
+        limit_actions = active_actions[current_player]
+
+        # Pad to size 13 for consistency
+        full_actions = jnp.zeros(13, dtype=jnp.bool_)
+        full_actions = full_actions.at[:3].set(limit_actions)
+        return full_actions
+
+    def initialize_game_params(self, env):
+        """Initialize limit-specific game parameters."""
+        # Limit games don't use raise multipliers - they're already initialized in the constructor
+        pass
+
+
+class NoLimitBettingStructure:
+    """Betting structure implementation for no-limit poker."""
+
+    def apply_action(self, env, state: State, action: int) -> State:
+        """Apply action using no-limit poker rules."""
+        # For no-limit games, use basic action for 0-2, nolimit action for 3+
+        is_basic_action = action < 3
+
+        return jax.lax.cond(
+            is_basic_action,
+            lambda s, a: env._apply_basic_action(s, a),
+            lambda s, a: env._apply_nolimit_action(s, a),
+            state,
+            action,
+        )
+
+    def get_legal_actions(self, env, state: State) -> Array:
+        """Get legal actions for no-limit poker (13 actions)."""
+        current_player = state.current_player
+
+        # 13-action no-limit logic
+        legal_actions = jnp.zeros(13, dtype=jnp.bool_)
+
+        # Actions 0-2 (FOLD, CALL, RAISE_MIN) - same logic as limit
+        can_fold = ~(state.all_in[current_player] | state.folded[current_player])
+        can_call = (
+            (state.bets[current_player] <= state.max_bet)
+            & (state.stacks[current_player] > 0)
+            & ~state.folded[current_player]
+        )
+        total_chips = state.stacks[current_player] + state.bets[current_player]
+        can_min_raise = (total_chips > state.max_bet) & ~state.folded[current_player]
+
+        legal_actions = legal_actions.at[0].set(can_fold)
+        legal_actions = legal_actions.at[1].set(can_call)
+        legal_actions = legal_actions.at[2].set(can_min_raise)
+
+        # Actions 3-12: vectorized check if player can afford each bet size
+        actions_to_check = jnp.arange(3, 13)
+
+        def check_affordability(action_idx):
+            bet_amount = env._calculate_nolimit_bet_amount(state, action_idx)
+            return (bet_amount > 0) & (bet_amount <= state.stacks[current_player]) & ~state.folded[current_player]
+
+        # Vectorized map over actions 3-12
+        affordability = jax.vmap(check_affordability)(actions_to_check)
+        legal_actions = legal_actions.at[3:13].set(affordability)
+
+        return legal_actions
+
+    def initialize_game_params(self, env):
+        """Initialize no-limit-specific game parameters."""
+        # Initialize raise_multipliers array (4 rounds, 10 actions each)
+        # Default preflop multipliers (round 0): bet size multipliers of current bet to call
+        preflop_defaults = [2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0, 12.0, -1.0]
+        # Default postflop multipliers (rounds 1-3): fraction of pot
+        postflop_defaults = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, -1.0]
+
+        # Create 4x10 array with defaults
+        multipliers = jnp.zeros((4, 10), dtype=jnp.float32)
+        multipliers = multipliers.at[0].set(jnp.array(preflop_defaults, dtype=jnp.float32))  # Round 0 (preflop)
+        for round_idx in [1, 2, 3]:  # Rounds 1-3 (postflop)
+            multipliers = multipliers.at[round_idx].set(jnp.array(postflop_defaults, dtype=jnp.float32))
+
+        env.raise_multipliers = multipliers
+
+
 class UniversalPoker(core.Env):
     def __init__(self, num_players: int = 2, config_str: str = None):
         super().__init__()
@@ -108,26 +206,23 @@ class UniversalPoker(core.Env):
             default_first_players = [preflop_first] + [postflop_first] * (self._num_rounds - 1)
         self.first_player_array = jnp.array(default_first_players, dtype=jnp.uint32)
 
-        # Initialize game type and raise multipliers for no-limit support
+        # Initialize game type and default raise multipliers for config parsing
         self.game_type = "limit"  # Default to limit hold'em
+        # Initialize default raise multipliers that can be overridden by config
+        self.raise_multipliers = jnp.zeros((4, 10), dtype=jnp.float32)
 
-        # Initialize raise_multipliers array (4 rounds, 10 actions each)
-        # Default preflop multipliers (round 0): bet size multipliers of current bet to call
-        preflop_defaults = [2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0, 12.0, -1.0]
-        # Default postflop multipliers (rounds 1-3): fraction of pot
-        postflop_defaults = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, -1.0]
-
-        # Create 4x10 array with defaults
-        multipliers = jnp.zeros((4, 10), dtype=jnp.float32)
-        multipliers = multipliers.at[0].set(jnp.array(preflop_defaults, dtype=jnp.float32))  # Round 0 (preflop)
-        for round_idx in [1, 2, 3]:  # Rounds 1-3 (postflop)
-            multipliers = multipliers.at[round_idx].set(jnp.array(postflop_defaults, dtype=jnp.float32))
-
-        self.raise_multipliers = multipliers
-
-        # Parse config string if provided - this will override the defaults above
+        # Parse config string if provided - this will set the game type and may update raise_multipliers
         if config_str is not None:
             self._parse_config_string(config_str)
+
+        # Initialize betting structure based on game type
+        if self.game_type == "nolimit":
+            self.betting_structure = NoLimitBettingStructure()
+            # If no config was provided or config didn't set multipliers, set no-limit defaults
+            if jnp.all(self.raise_multipliers == 0):
+                self.betting_structure.initialize_game_params(self)
+        else:
+            self.betting_structure = LimitPokerBettingStructure()
 
     def _parse_config_string(self, config_str: str):
         """Parse GAMEDEF config string similar to C++ readGame function."""
@@ -474,24 +569,7 @@ class UniversalPoker(core.Env):
 
     def _apply_action(self, state: State, action: int) -> State:
         """Apply the given action to the current state."""
-        # For limit games, always use basic action logic (actions 0-2 only)
-        # For no-limit games, use basic action for 0-2, nolimit action for 3+
-        is_basic_action = action < 3
-        is_nolimit_game = self.game_type == "nolimit"
-
-        return jax.lax.cond(
-            is_basic_action,
-            lambda s, a: self._apply_basic_action(s, a),
-            lambda s, a: jax.lax.cond(
-                is_nolimit_game,
-                lambda s2, a2: self._apply_nolimit_action(s2, a2),
-                lambda s2, a2: s2,  # Invalid action for limit game - return unchanged state
-                s,
-                a,
-            ),
-            state,
-            action,
-        )
+        return self.betting_structure.apply_action(self, state, action)
 
     def _apply_basic_action(self, state: State, action: int) -> State:
         """Apply basic actions (fold, call, min_raise) for both limit and no-limit."""
@@ -690,56 +768,7 @@ class UniversalPoker(core.Env):
 
     def _get_legal_actions(self, state: State) -> Array:
         """Get legal actions for current player."""
-        current_player = state.current_player
-        is_limit_game = self.game_type == "limit"
-
-        def limit_legal_actions():
-            # Original 3-action limit logic
-            can_fold = ~(state.all_in | state.folded)
-            can_call = (state.bets <= state.max_bet) & (state.stacks > 0) & ~state.folded
-            total_chips = state.stacks + state.bets
-            can_raise = (total_chips > state.max_bet) & ~state.folded
-
-            active_actions = jnp.column_stack([can_fold, can_call, can_raise])
-            limit_actions = active_actions[current_player]
-
-            # Pad to size 13 for consistency
-            full_actions = jnp.zeros(13, dtype=jnp.bool_)
-            full_actions = full_actions.at[:3].set(limit_actions)
-            return full_actions
-
-        def nolimit_legal_actions():
-            # 13-action no-limit logic
-            legal_actions = jnp.zeros(13, dtype=jnp.bool_)
-
-            # Actions 0-2 (FOLD, CALL, RAISE_MIN) - same logic as limit
-            can_fold = ~(state.all_in[current_player] | state.folded[current_player])
-            can_call = (
-                (state.bets[current_player] <= state.max_bet)
-                & (state.stacks[current_player] > 0)
-                & ~state.folded[current_player]
-            )
-            total_chips = state.stacks[current_player] + state.bets[current_player]
-            can_min_raise = (total_chips > state.max_bet) & ~state.folded[current_player]
-
-            legal_actions = legal_actions.at[0].set(can_fold)
-            legal_actions = legal_actions.at[1].set(can_call)
-            legal_actions = legal_actions.at[2].set(can_min_raise)
-
-            # Actions 3-12: vectorized check if player can afford each bet size
-            actions_to_check = jnp.arange(3, 13)
-
-            def check_affordability(action_idx):
-                bet_amount = self._calculate_nolimit_bet_amount(state, action_idx)
-                return (bet_amount > 0) & (bet_amount <= state.stacks[current_player]) & ~state.folded[current_player]
-
-            # Vectorized map over actions 3-12
-            affordability = jax.vmap(check_affordability)(actions_to_check)
-            legal_actions = legal_actions.at[3:13].set(affordability)
-
-            return legal_actions
-
-        return jax.lax.cond(is_limit_game, limit_legal_actions, nolimit_legal_actions)
+        return self.betting_structure.get_legal_actions(self, state)
 
     def _calculate_terminal_winnings(self, state: State) -> Array:
         """Calculate terminal winnings for all players with proper side pot distribution."""
