@@ -65,5 +65,5 @@ PYTHONPATH=$PYTHONPATH:~/poker/pgx python3 tests/test_universal_poker_speed.py
 
 ## Performance Metrics
 - **Original**: ~16GB memory usage in vectorized mode, 200k hands/sec.
-- **Current**: ~14.5GB memory usage in vectorized mode, 90k hands/sec.
+- **Current**: ~14.5GB memory usage in vectorized mode,100k hands/sec.
 - **Test coverage**: 105 comprehensive test cases, all passing
