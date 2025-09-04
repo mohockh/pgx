@@ -632,6 +632,35 @@ class Visualizer:
                 )
             else:
                 self.config["COLOR_SET"] = ColorSet("white", "black", "lightgray", "white", "white", "black")
+        elif _state.env_id == "universal_poker":
+            from pgx._src.games.universal_poker import _make_universal_poker_dwg
+
+            self.config["GRID_SIZE"] = 50
+            self.config["BOARD_WIDTH"] = 16
+            self.config["BOARD_HEIGHT"] = 12
+            self._make_dwg_group = _make_universal_poker_dwg  # type:ignore
+            if (self.config["COLOR_THEME"] is None and self.config["COLOR_THEME"] == "dark") or self.config[
+                "COLOR_THEME"
+            ] == "dark":
+                self.config["COLOR_SET"] = ColorSet(
+                    "white",
+                    "lightgray", 
+                    "black",
+                    "black",
+                    "#1e1e1e",
+                    "silver",
+                    "white",
+                )
+            else:
+                self.config["COLOR_SET"] = ColorSet(
+                    "black",
+                    "white",
+                    "black",
+                    "black", 
+                    "white",
+                    "black",
+                    "black",
+                )
         else:
             assert False
 
