@@ -54,7 +54,7 @@ class TestUniversalPokerPlayers:
 
         # Fold players 1 and 2, leaving 0 and 3 active
         folded = jnp.array([False, True, True, False])
-        active_mask = (~folded) & (~state.all_in) & state.player_mask
+        active_mask = (~folded) & (~state.all_in)
         state = state.replace(folded=folded, active_mask=active_mask)
 
         # From player 0, should skip to player 3
@@ -75,7 +75,7 @@ class TestUniversalPokerPlayers:
 
         # Players 1 and 2 are all-in, leaving 0 and 3 active
         all_in = jnp.array([False, True, True, False])
-        active_mask = (~state.folded) & (~all_in) & state.player_mask
+        active_mask = (~state.folded) & (~all_in)
         state = state.replace(all_in=all_in, active_mask=active_mask)
 
         # From player 0, should skip to player 3
@@ -95,7 +95,7 @@ class TestUniversalPokerPlayers:
 
         # Only player 1 is active (others folded)
         folded = jnp.array([True, False, True])
-        active_mask = (~folded) & (~state.all_in) & state.player_mask
+        active_mask = (~folded) & (~state.all_in)
         state = state.replace(folded=folded, active_mask=active_mask, current_player=1)
 
         next_player = env._get_next_active_player_from(state, state.current_player + 1)
@@ -134,7 +134,7 @@ class TestUniversalPokerPlayers:
 
         # Test with player 1 folded
         folded = jnp.array([False, True, False, False])
-        active_mask = (~folded) & (~state.all_in) & state.player_mask
+        active_mask = (~folded) & (~state.all_in)
         state = state.replace(folded=folded, active_mask=active_mask)
 
         # From position 1, should find next active player (2)
@@ -143,7 +143,7 @@ class TestUniversalPokerPlayers:
 
         # Test with player 2 folded
         folded = jnp.array([False, False, True, False])
-        active_mask = (~folded) & (~state.all_in) & state.player_mask
+        active_mask = (~folded) & (~state.all_in)
         state = state.replace(folded=folded, active_mask=active_mask)
 
         # From position 1, should find next active player (3)
@@ -156,7 +156,7 @@ class TestUniversalPokerPlayers:
 
         # Test wrapping with folded players - if we want to test wrapping to 0, we need to start from position 3
         folded_more = jnp.array([True, True, False, False])  # Players 0 and 1 folded, only 2 and 3 active
-        active_mask_more = (~folded_more) & (~state.all_in) & state.player_mask
+        active_mask_more = (~folded_more) & (~state.all_in)
         state_more = state.replace(folded=folded_more, active_mask=active_mask_more)
 
         # Now from position 3, should wrap to 0 and advance to 2 (since 0 and 1 are folded)
@@ -215,7 +215,7 @@ class TestUniversalPokerPlayers:
 
         # Fold player 2
         folded = jnp.array([False, False, True, False])
-        active_mask = (~folded) & (~state.all_in) & state.player_mask
+        active_mask = (~folded) & (~state.all_in)
         state = state.replace(folded=folded, active_mask=active_mask)
 
         # Test that _get_next_active_player and _get_next_active_player_from are consistent
@@ -270,7 +270,7 @@ class TestUniversalPokerPlayers:
         # Complex scenario: players 0,3,5 active, 1,4 folded, 2 all-in
         folded = jnp.array([False, True, False, False, True, False])
         all_in = jnp.array([False, False, True, False, False, False])
-        active_mask = (~folded) & (~all_in) & state.player_mask
+        active_mask = (~folded) & (~all_in)
         state = state.replace(folded=folded, all_in=all_in, active_mask=active_mask)
 
         # Verify active mask is correct
@@ -305,7 +305,7 @@ class TestUniversalPokerPlayers:
         # Test with only one active player - need to reset all_in array
         folded_single = jnp.array([True, True, False, True, True, True])
         all_in_single = jnp.array([False, False, False, False, False, False])  # Reset all_in
-        active_mask_single = (~folded_single) & (~all_in_single) & state.player_mask
+        active_mask_single = (~folded_single) & (~all_in_single)
         state_single = state.replace(folded=folded_single, all_in=all_in_single, active_mask=active_mask_single)
 
         # Only player 2 should be active (not all-in and not folded)

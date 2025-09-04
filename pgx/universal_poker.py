@@ -65,7 +65,6 @@ class State(core.State):
     last_raiser: Array = jnp.uint32(0)
 
     # Pre-computed masks for performance optimization
-    player_mask: Array = None  # Which positions are valid players
     active_mask: Array = None  # Which players are not folded/all-in
 
     @property
@@ -254,9 +253,6 @@ class UniversalPoker(core.Env):
             dtype=jnp.uint32,
         )
 
-        # Initialize pre-computed masks for performance optimization
-        player_mask = jnp.arange(self._num_players) < self._num_players
-
         # Create preliminary state with round = max uint32 (will advance to round 0)
         preliminary_state = State(
             round=jnp.uint32(4294967295),  # Will overflow to 0 when incremented in _advance_round
@@ -272,8 +268,7 @@ class UniversalPoker(core.Env):
             board_cardset=board_cardset,
             visible_board_cardsets=visible_board_cardsets,
             hand_final_scores=hand_final_scores,
-            player_mask=player_mask,
-            active_mask=~folded & player_mask,  # Initial active mask before all-ins
+            active_mask=~folded,  # Initial active mask before all-ins
             rewards=jnp.zeros(self._num_players, dtype=jnp.float32),
             terminated=should_terminate,
         )
@@ -317,7 +312,7 @@ class UniversalPoker(core.Env):
         all_in = stacks_after_blinds == 0
 
         # Update active mask to exclude folded and all-in players
-        active_mask = ~folded & ~all_in & player_mask
+        active_mask = ~folded & ~all_in
 
         # Apply blind posting results to state
         state_with_blinds = state_after_round_setup.replace(
@@ -366,7 +361,9 @@ class UniversalPoker(core.Env):
         # Combined function for terminated case: don't advance, calculate final rewards and legal actions
         def terminated_branch():
             terminal_winnings = self._calculate_terminal_winnings(new_state)
-            final_rewards = terminal_winnings.astype(jnp.float32) - (new_state.previous_round_bets + new_state.bets).astype(jnp.float32)
+            final_rewards = terminal_winnings.astype(jnp.float32) - (
+                new_state.previous_round_bets + new_state.bets
+            ).astype(jnp.float32)
             updated_stacks = new_state.stacks + terminal_winnings
             final_legal_actions = jnp.ones(3, dtype=jnp.bool_)
             # Reset pot to 0 since all chips have been distributed to players
@@ -467,7 +464,7 @@ class UniversalPoker(core.Env):
             min_raise=new_min_raise,
             all_in=new_all_in,
             last_raiser=new_last_raiser,
-            active_mask=(~new_folded & ~new_all_in & state.player_mask),
+            active_mask=(~new_folded & ~new_all_in),
             num_actions_this_round=state.num_actions_this_round + 1,
         )
 
@@ -573,25 +570,58 @@ class UniversalPoker(core.Env):
 
     def _calculate_terminal_winnings(self, state: State) -> Array:
         """Calculate terminal winnings for all players with proper side pot distribution."""
-        # Get active players (not folded) - use pre-computed masks
-        active_mask = ~state.folded & state.player_mask
-        num_active = jnp.sum(active_mask)
+        # Get number of non-folded players
+        num_active = jnp.sum(~state.folded, dtype=jnp.int32)
 
-        # Handle single winner case (early fold scenarios)
-        is_single_winner = num_active == 1
-        reached_showdown = state.round >= self._num_rounds
-        is_showdown = (~is_single_winner) & reached_showdown
+        # Check if we have a single pot scenario (all active players contributed same amount)
+        total_contributions = state.previous_round_bets + state.bets
+        max_contribution = jnp.max(total_contributions)
+        active_contributions = jnp.where(state.folded, max_contribution, total_contributions)
 
-        def single_winner_case():
-            single_winner_idx = jnp.argmax(active_mask)
-            winnings = jnp.zeros(self._num_players, dtype=jnp.uint32)
-            return winnings.at[single_winner_idx].set(state.pot)
+        # Single pot if all active players have the same contribution amount
+        # This includes the single winner case (num_active == 1) as a special case
+        is_single_pot = jnp.all((active_contributions == max_contribution) | state.folded)
+
+        def single_pot_calculation():
+            """Handle single pot scenario where all active players contributed the same amount."""
+            # Only active players can win - mask out inactive players' hand strengths
+            hand_strengths = jnp.where(state.folded, jnp.uint32(0), state.hand_final_scores)
+
+            # Find the maximum hand strength among active players
+            max_strength = jnp.max(hand_strengths)
+
+            # Identify all active players with the winning hand strength
+            is_winner = (~state.folded) & (hand_strengths == max_strength)
+            num_winners = jnp.sum(is_winner, dtype=jnp.uint32)
+
+            # Avoid division by zero
+            safe_num_winners = jnp.where(num_winners > 0, num_winners, jnp.uint32(1))
+
+            # Calculate base payout per winner and remainder
+            payout_per_winner = state.pot // safe_num_winners
+            remainder_chips = state.pot % safe_num_winners
+
+            # Distribute base winnings to all winners
+            base_winnings = jnp.where(is_winner, payout_per_winner, jnp.uint32(0))
+
+            # Distribute remainder chips to winners in positional order
+            # Create cumulative count of winners up to each position
+            winner_cumsum = jnp.cumsum(is_winner.astype(jnp.uint32))
+
+            # A winner gets a remainder chip if their position in winner order <= remainder_chips
+            gets_remainder = is_winner & (winner_cumsum <= remainder_chips)
+            remainder_winnings = gets_remainder.astype(jnp.uint32)
+
+            # Combine base and remainder winnings
+            total_winnings = base_winnings + remainder_winnings
+
+            return total_winnings
 
         def side_pot_calculation():
             # Use total contributions (previous rounds + current round) from ALL players - keep as uint32
             total_contributions = state.previous_round_bets + state.bets
             # Only active players can win - mask out inactive players' hand strengths
-            hand_strengths = jnp.where(active_mask, state.hand_final_scores, jnp.uint32(0))
+            hand_strengths = jnp.where(state.folded, jnp.uint32(0), state.hand_final_scores)
 
             # --- 1. Identify Pot Layers ---
             # Find unique contribution levels to define pot boundaries
@@ -668,8 +698,9 @@ class UniversalPoker(core.Env):
             return total_winnings
 
         # Calculate final winnings based on game state
-        # Only use single_winner_case or side_pot_calculation (no equal_split_case needed)
-        final_winnings = jnp.where(is_single_winner, single_winner_case(), side_pot_calculation())
+        # Use optimized single_pot_calculation when all active players contributed the same amount
+        # Otherwise use complex side_pot_calculation for multiple pot layers
+        final_winnings = jnp.where(is_single_pot, single_pot_calculation(), side_pot_calculation())
 
         # Return winnings for all players - now properly sized
         return final_winnings
@@ -678,7 +709,9 @@ class UniversalPoker(core.Env):
         """Calculate final rewards for all players as net stack change."""
         terminal_winnings = self._calculate_terminal_winnings(state)
         # Rewards = winnings - total contributions (net stack change)
-        net_stack_change = terminal_winnings.astype(jnp.float32) - (state.previous_round_bets + state.bets).astype(jnp.float32)
+        net_stack_change = terminal_winnings.astype(jnp.float32) - (state.previous_round_bets + state.bets).astype(
+            jnp.float32
+        )
         return net_stack_change
 
     @property

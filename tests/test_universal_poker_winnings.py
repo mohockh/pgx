@@ -119,16 +119,12 @@ END GAMEDEF"""
             stacks=jnp.array(stacks, dtype=jnp.uint32),
             bets=jnp.array(bets, dtype=jnp.uint32),
             folded=jnp.array(folded, dtype=jnp.bool_),
+            active_mask=~jnp.array(folded, dtype=jnp.bool_),
             hand_final_scores=jnp.array(hand_strengths, dtype=jnp.uint32),
             round=4,  # Force showdown
             pot=pot if pot is not None else jnp.sum(jnp.array(bets, dtype=jnp.uint32)),
             rewards=jnp.zeros(num_players, dtype=jnp.float32),  # Set correct reward array size
         )
-
-        # Update player and active masks
-        player_mask = jnp.arange(num_players) < num_players
-        active_mask = ~state.folded & player_mask
-        state = state.replace(player_mask=player_mask, active_mask=active_mask)
 
         return env, state
 
@@ -645,7 +641,6 @@ END GAMEDEF"""
             pot=jnp.uint32(22),  # Total pot is correct: 1+2+6+5+4+4=22
             folded=jnp.array([False, False], dtype=jnp.bool_),
             hand_final_scores=jnp.array([5000, 5000], dtype=jnp.uint32),  # Tied hands
-            player_mask=jnp.array([True, True], dtype=jnp.bool_),
             active_mask=jnp.array([True, True], dtype=jnp.bool_),
             rewards=jnp.zeros(2, dtype=jnp.float32),
         )
@@ -716,7 +711,6 @@ END GAMEDEF"""
             pot=jnp.uint32(60),  # 8+14+12+12+6+8 = 60
             folded=jnp.array([False, False, False], dtype=jnp.bool_),
             hand_final_scores=jnp.array([6000, 6000, 6000], dtype=jnp.uint32),  # All tied
-            player_mask=jnp.array([True, True, True], dtype=jnp.bool_),
             active_mask=jnp.array([True, True, True], dtype=jnp.bool_),
             rewards=jnp.zeros(3, dtype=jnp.float32),
         )
@@ -761,7 +755,6 @@ END GAMEDEF"""
             folded=jnp.array([False, False, False], dtype=jnp.bool_),
             all_in=jnp.array([True, False, False], dtype=jnp.bool_),
             hand_final_scores=jnp.array([8000, 4000, 2000], dtype=jnp.uint32),  # P0 best hand
-            player_mask=jnp.array([True, True, True], dtype=jnp.bool_),
             active_mask=jnp.array([False, True, True], dtype=jnp.bool_),  # P0 all-in, others active
             rewards=jnp.zeros(3, dtype=jnp.float32),
         )
