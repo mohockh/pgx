@@ -26,7 +26,7 @@ class State(core.State):
     rewards: Array = jnp.float32([0.0, 0.0])
     terminated: Array = FALSE
     truncated: Array = FALSE
-    legal_action_mask: Array = jnp.ones(13, dtype=jnp.bool_)  # Size 13 for no-limit, first 3 used for limit
+    legal_action_mask: Array = jnp.ones(0, dtype=jnp.bool_)  # Size determined dynamically based on game type
     _step_count: Array = jnp.uint32(0)
 
     # Universal Poker specific fields
@@ -92,10 +92,8 @@ class LimitPokerBettingStructure:
         active_actions = jnp.column_stack([can_fold, can_call, can_raise])
         limit_actions = active_actions[current_player]
 
-        # Pad to size 13 for consistency
-        full_actions = jnp.zeros(13, dtype=jnp.bool_)
-        full_actions = full_actions.at[:3].set(limit_actions)
-        return full_actions
+        # Return size 3 array directly for limit poker
+        return limit_actions
 
     def initialize_game_params(self, env):
         """Initialize limit-specific game parameters."""
@@ -418,6 +416,7 @@ class UniversalPoker(core.Env):
             active_mask=~folded,  # Initial active mask before all-ins
             rewards=jnp.zeros(self._num_players, dtype=jnp.float32),
             terminated=should_terminate,
+            legal_action_mask=jnp.ones(self.action_space_size, dtype=jnp.bool_),  # Use dynamic size
         )
 
         # Use _advance_round to set up round 0 (sets min_raise, current_player, last_raiser, etc.)
@@ -513,8 +512,8 @@ class UniversalPoker(core.Env):
             ).astype(jnp.float32)
             updated_stacks = new_state.stacks + terminal_winnings
             final_legal_actions = jnp.ones(
-                13, dtype=jnp.bool_
-            )  # Use max size, _get_legal_actions will handle game type
+                self.action_space_size, dtype=jnp.bool_
+            )  # Use dynamic size based on game type
             # Reset pot to 0 since all chips have been distributed to players
             return new_state.replace(
                 rewards=final_rewards, stacks=updated_stacks, pot=jnp.uint32(0), legal_action_mask=final_legal_actions
@@ -927,3 +926,8 @@ class UniversalPoker(core.Env):
     @property
     def num_players(self) -> int:
         return self._num_players
+
+    @property
+    def action_space_size(self) -> int:
+        """Return action space size based on game type."""
+        return 13 if self.game_type == "nolimit" else 3

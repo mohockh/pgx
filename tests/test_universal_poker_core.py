@@ -553,17 +553,13 @@ END GAMEDEF"""
         state1 = env1.init(key)
         state2 = env2.init(key)
 
-        # legal_action_mask is always size 13 now, but only first 3 are used for limit
+        # legal_action_mask size now matches game type: 3 for limit, 13 for no-limit
         assert state1.legal_action_mask.shape == (
-            13,
-        ), f"Action mask should be size 13, got shape {state1.legal_action_mask.shape}"
+            3,
+        ), f"Action mask should be size 3 for limit games, got shape {state1.legal_action_mask.shape}"
         assert state2.legal_action_mask.shape == (
-            13,
-        ), f"Action mask should be size 13, got shape {state2.legal_action_mask.shape}"
-
-        # For limit games, only first 3 actions should be set, rest should be False
-        assert jnp.all(state1.legal_action_mask[3:] == False), "Actions 3-12 should be False for limit games"
-        assert jnp.all(state2.legal_action_mask[3:] == False), "Actions 3-12 should be False for limit games"
+            3,
+        ), f"Action mask should be size 3 for limit games, got shape {state2.legal_action_mask.shape}"
 
 
 if __name__ == "__main__":

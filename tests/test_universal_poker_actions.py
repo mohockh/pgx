@@ -288,8 +288,8 @@ END GAMEDEF"""
         # Should return JAX array
         assert isinstance(legal_actions, jnp.ndarray), "Should return JAX array"
 
-        # Should have shape (13,) for expanded action space [fold, call, raise, 10 sized raises]
-        assert legal_actions.shape == (13,), f"Should have shape (13,), got {legal_actions.shape}"
+        # Should have shape (3,) for limit poker [fold, call, raise]
+        assert legal_actions.shape == (3,), f"Should have shape (3,) for limit poker, got {legal_actions.shape}"
 
         # Should have boolean dtype
         assert legal_actions.dtype == jnp.bool_, f"Should have boolean dtype, got {legal_actions.dtype}"
