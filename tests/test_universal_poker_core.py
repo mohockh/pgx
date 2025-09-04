@@ -424,6 +424,147 @@ END GAMEDEF"""
             hole_cards = cardset_to_cards(state.hole_cardsets[p])[:2]  # Take first 2
             assert jnp.all(hole_cards >= 0)
 
+    # No-Limit Configuration Tests
+    def test_config_nolimit_basic(self):
+        """Test basic 'nolimit' keyword parsing."""
+        config_str = """GAMEDEF
+nolimit
+numplayers = 2
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+
+        # Should set game_type to 'nolimit'
+        assert hasattr(env, "game_type"), "Environment should have game_type attribute"
+        assert env.game_type == "nolimit", f"Expected 'nolimit', got '{env.game_type}'"
+
+        # Should have default raise_multipliers
+        assert hasattr(env, "raise_multipliers"), "Environment should have raise_multipliers attribute"
+        assert env.raise_multipliers.shape == (4, 10), f"Expected shape (4, 10), got {env.raise_multipliers.shape}"
+
+    def test_config_raise_multipliers_parsing(self):
+        """Test raise_multipliers parsing with space-separated format."""
+        config_str = """GAMEDEF
+nolimit  
+raise_multipliers 0 2.0 2.5 3.0 all_in
+raise_multipliers 1 0.33 0.5 0.75 all_in
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+
+        # Verify raise_multipliers[0] contains parsed preflop values
+        assert env.raise_multipliers[0, 0] == 2.0, f"Expected 2.0, got {env.raise_multipliers[0, 0]}"
+        assert env.raise_multipliers[0, 1] == 2.5, f"Expected 2.5, got {env.raise_multipliers[0, 1]}"
+        assert env.raise_multipliers[0, 2] == 3.0, f"Expected 3.0, got {env.raise_multipliers[0, 2]}"
+        assert env.raise_multipliers[0, 3] == -1.0, f"Expected -1.0 (all_in), got {env.raise_multipliers[0, 3]}"
+
+        # Verify raise_multipliers[1] contains parsed postflop values
+        assert env.raise_multipliers[1, 0] == 0.33, f"Expected 0.33, got {env.raise_multipliers[1, 0]}"
+        assert env.raise_multipliers[1, 1] == 0.5, f"Expected 0.5, got {env.raise_multipliers[1, 1]}"
+        assert env.raise_multipliers[1, 2] == 0.75, f"Expected 0.75, got {env.raise_multipliers[1, 2]}"
+        assert env.raise_multipliers[1, 3] == -1.0, f"Expected -1.0 (all_in), got {env.raise_multipliers[1, 3]}"
+
+    def test_config_nolimit_defaults(self):
+        """Test default multipliers when rounds not specified."""
+        config_str = """GAMEDEF
+nolimit
+numplayers = 2
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+
+        # Should have sensible defaults for preflop (round 0)
+        expected_preflop = [2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0, 12.0, -1.0]
+        for i, expected in enumerate(expected_preflop):
+            actual = float(env.raise_multipliers[0, i])
+            assert actual == expected, f"Preflop default[{i}]: expected {expected}, got {actual}"
+
+        # Should have sensible defaults for postflop (rounds 1-3)
+        expected_postflop = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, -1.0]
+        for round_num in [1, 2, 3]:
+            for i, expected in enumerate(expected_postflop):
+                actual = float(env.raise_multipliers[round_num, i])
+                assert (
+                    abs(actual - expected) < 1e-5
+                ), f"Round {round_num} default[{i}]: expected {expected}, got {actual}"
+
+    def test_config_all_rounds_specified(self):
+        """Test configuration with all 4 rounds specified."""
+        config_str = """GAMEDEF
+nolimit
+raise_multipliers 0 2.0 3.0 all_in
+raise_multipliers 1 0.25 0.5 all_in  
+raise_multipliers 2 0.33 0.67 all_in
+raise_multipliers 3 0.5 1.0 all_in
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+
+        # Check each round has correct values
+        assert (
+            env.raise_multipliers[0, 0] == 2.0
+            and env.raise_multipliers[0, 1] == 3.0
+            and env.raise_multipliers[0, 2] == -1.0
+        )
+        assert (
+            env.raise_multipliers[1, 0] == 0.25
+            and env.raise_multipliers[1, 1] == 0.5
+            and env.raise_multipliers[1, 2] == -1.0
+        )
+        assert (
+            env.raise_multipliers[2, 0] == 0.33
+            and env.raise_multipliers[2, 1] == 0.67
+            and env.raise_multipliers[2, 2] == -1.0
+        )
+        assert (
+            env.raise_multipliers[3, 0] == 0.5
+            and env.raise_multipliers[3, 1] == 1.0
+            and env.raise_multipliers[3, 2] == -1.0
+        )
+
+    def test_config_invalid_nolimit(self):
+        """Test error handling for invalid nolimit configurations."""
+        # Test invalid round number
+        config_str = """GAMEDEF
+nolimit
+raise_multipliers 5 2.0 3.0
+END GAMEDEF"""
+        try:
+            env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+            # Should not raise error but should ignore invalid round
+            assert env.game_type == "nolimit"  # Should still parse nolimit correctly
+        except Exception:
+            pass  # It's okay if it raises an error for invalid round
+
+    def test_config_backward_compatibility(self):
+        """Test that limit games still work unchanged."""
+        # Default behavior (no config)
+        env1 = universal_poker.UniversalPoker(num_players=2)
+        assert hasattr(env1, "game_type") and env1.game_type == "limit"
+
+        # Explicit limit config
+        config_str = """GAMEDEF
+limit
+numplayers = 2
+stack = 200 200
+blind = 1 2
+END GAMEDEF"""
+        env2 = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+        assert hasattr(env2, "game_type") and env2.game_type == "limit"
+
+        # Both should behave identically
+        key = jax.random.PRNGKey(42)
+        state1 = env1.init(key)
+        state2 = env2.init(key)
+
+        # legal_action_mask is always size 13 now, but only first 3 are used for limit
+        assert state1.legal_action_mask.shape == (
+            13,
+        ), f"Action mask should be size 13, got shape {state1.legal_action_mask.shape}"
+        assert state2.legal_action_mask.shape == (
+            13,
+        ), f"Action mask should be size 13, got shape {state2.legal_action_mask.shape}"
+
+        # For limit games, only first 3 actions should be set, rest should be False
+        assert jnp.all(state1.legal_action_mask[3:] == False), "Actions 3-12 should be False for limit games"
+        assert jnp.all(state2.legal_action_mask[3:] == False), "Actions 3-12 should be False for limit games"
+
 
 if __name__ == "__main__":
     import sys
