@@ -533,6 +533,107 @@ END GAMEDEF"""
         assert new_state.folded[current_player]
         assert new_state.terminated  # Game should end with fold in 2-player game
 
+    def test_min_raise_underflow_bug_limit(self):
+        """Test that demonstrates the min_raise uint32 underflow bug in limit poker."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 100 100 100
+blind = 1 2 0
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        # Set up a scenario where previous player has a higher bet than current player
+        # Player positions: 0=SB(1), 1=BB(2), 2=dealer(0)
+        # Current player should be player 2 (dealer, first to act preflop in 3-player)
+
+        # Manually set up bets to create the underflow scenario
+        # Make previous player (position 1) have bet=10, current player (position 2) will have bet=0
+        state = state.replace(
+            bets=jnp.array([1, 10, 0], dtype=jnp.uint32),  # Player 1 has higher bet than player 2
+            current_player=jnp.uint32(2),  # Current player is position 2
+            max_bet=jnp.uint32(10),
+            min_raise=jnp.uint32(2),  # Big blind amount as initial min_raise
+        )
+
+        initial_min_raise = state.min_raise
+
+        # When player 2 folds, the buggy logic will calculate:
+        # bet_before = state.bets[1] = 10 (previous player's bet)
+        # new_bets[2] = 0 (current player's bet after fold - unchanged)
+        # raise_increment = 0 - 10 = -10, cast to uint32 = 4294967286
+        new_state = env._apply_action(state, universal_poker.FOLD)
+
+        # The bug causes min_raise to become astronomically large due to uint32 underflow
+        # This assertion should FAIL with the current buggy code
+        assert new_state.min_raise < 1000, f"min_raise should not underflow to large value, got {new_state.min_raise}"
+
+        # min_raise should remain unchanged for fold actions
+        assert (
+            new_state.min_raise == initial_min_raise
+        ), f"min_raise should not change on fold, was {initial_min_raise}, now {new_state.min_raise}"
+
+    def test_min_raise_logic_basic_actions(self):
+        """Test correct min_raise behavior for fold/call/raise actions."""
+        env = universal_poker.UniversalPoker(num_players=2)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        initial_min_raise = state.min_raise
+        current_player = state.current_player
+
+        # Test 1: Fold should not change min_raise
+        fold_state = env._apply_action(state, universal_poker.FOLD)
+        assert fold_state.min_raise == initial_min_raise, "Fold should not change min_raise"
+
+        # Test 2: Call should not change min_raise
+        call_state = env._apply_action(state, universal_poker.CALL)
+        assert call_state.min_raise == initial_min_raise, "Call should not change min_raise"
+
+        # Test 3: Raise should update min_raise appropriately
+        raise_state = env._apply_action(state, universal_poker.RAISE)
+        # For raises, min_raise should be based on the actual raise increment
+        expected_raise_increment = raise_state.bets[current_player] - state.max_bet
+        assert raise_state.min_raise >= initial_min_raise, "Raise should maintain or increase min_raise"
+        assert raise_state.min_raise == jnp.maximum(
+            initial_min_raise, expected_raise_increment
+        ), "Raise should set min_raise correctly"
+
+    def test_min_raise_underflow_bug_nolimit(self):
+        """Test potential min_raise underflow bug in no-limit poker."""
+        config_str = """GAMEDEF
+numplayers = 2
+stack = 100 100
+blind = 1 2
+nolimit
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        initial_min_raise = state.min_raise
+        current_player = state.current_player
+
+        # Test basic actions don't cause underflow
+        fold_state = env._apply_action(state, universal_poker.FOLD)
+        assert (
+            fold_state.min_raise < 1000000
+        ), f"No-limit fold should not cause min_raise underflow, got {fold_state.min_raise}"
+
+        call_state = env._apply_action(state, universal_poker.CALL)
+        assert (
+            call_state.min_raise < 1000000
+        ), f"No-limit call should not cause min_raise underflow, got {call_state.min_raise}"
+
+        # Test no-limit raise actions (3-12)
+        for action in range(3, 13):
+            if state.legal_action_mask[action]:  # Only test legal actions
+                nolimit_state = env._apply_action(state, action)
+                assert (
+                    nolimit_state.min_raise < 1000000
+                ), f"No-limit action {action} should not cause min_raise underflow, got {nolimit_state.min_raise}"
+
 
 if __name__ == "__main__":
     import sys

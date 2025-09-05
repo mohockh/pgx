@@ -600,11 +600,11 @@ class UniversalPoker(core.Env):
         new_all_in = state.all_in.at[current_player].set(new_stacks[current_player] == 0)
         new_last_raiser = jnp.where(is_raise, jnp.uint32(current_player), state.last_raiser)
 
-        # Update min_raise - calculate raise increment from previous player's bet
-        bet_before = state.bets[(current_player - 1) % state.num_players]  # Get previous player's bet amount
-        raise_increment = (new_bets[current_player] - bet_before).astype(
-            jnp.uint32
-        )  # This bet raised last player by raise_increment
+        # Update min_raise - only for raise actions, based on raise increment from max_bet
+        # For fold/call actions, raise_increment will be 0, so min_raise remains unchanged
+        raise_increment = jnp.where(
+            is_raise, (new_bets[current_player] - state.max_bet).astype(jnp.uint32), jnp.uint32(0)
+        )
         new_min_raise = jnp.maximum(state.min_raise, raise_increment)
 
         return state.replace(
@@ -636,7 +636,11 @@ class UniversalPoker(core.Env):
         new_last_raiser = jnp.uint32(current_player)
 
         # Update min_raise based on raise amount
-        raise_increment = (new_bets[current_player] - state.max_bet).astype(jnp.uint32)
+        # Only update min_raise if this actually resulted in a raise (new_bet > max_bet)
+        is_raise = new_bets[current_player] > state.max_bet
+        raise_increment = jnp.where(
+            is_raise, (new_bets[current_player] - state.max_bet).astype(jnp.uint32), jnp.uint32(0)
+        )
         new_min_raise = jnp.maximum(state.min_raise, raise_increment)
 
         return state.replace(
