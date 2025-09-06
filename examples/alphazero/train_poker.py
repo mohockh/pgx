@@ -268,26 +268,9 @@ def create_poker_trainer(config: PokerConfig, env: pgx.core.Env, baseline_policy
                 actor = state.current_player
                 keys = jax.random.split(key2, batch_size)
 
-                # Only step games that haven't terminated
-                not_terminated = ~state.terminated
-
                 # Step all games (JAX vmap requires uniform operations)
-                # but we'll only keep results for non-terminated games
-                new_state = jax.vmap(env.step)(state, policy_output.action)
-
-                # For terminated games, do NOTHING - keep the old state unchanged
-                # For non-terminated games, use the new state from env.step
-                def selective_step_only(old_val, new_val):
-                    # Handle different array dimensions by expanding not_terminated appropriately
-                    if old_val.ndim == 1:
-                        mask = not_terminated
-                    else:
-                        # Create mask with same number of dimensions as the values
-                        mask_shape = (batch_size,) + (1,) * (old_val.ndim - 1)
-                        mask = not_terminated.reshape(mask_shape)
-                    return jnp.where(mask, new_val, old_val)  # Keep old state for terminated games
-
-                state = jax.tree_util.tree_map(selective_step_only, state, new_state)
+                # PGX env will avoid stepping terminated games for us.
+                state = jax.vmap(env.step)(state, policy_output.action)
 
                 discount = -1.0 * jnp.ones_like(value)
                 discount = jnp.where(state.terminated, 0.0, discount)
@@ -387,22 +370,8 @@ def create_poker_trainer(config: PokerConfig, env: pgx.core.Env, baseline_policy
                 key, subkey = jax.random.split(key)
                 action = jax.random.categorical(subkey, logits, axis=-1)
 
-                # Only step games that haven't terminated
-                not_terminated = ~state.terminated
-                new_state = jax.vmap(env.step)(state, action)
-
-                # Preserve terminated states, update only non-terminated ones
-                def selective_update(old_val, new_val):
-                    # Handle different array dimensions by expanding not_terminated appropriately
-                    if old_val.ndim == 1:
-                        mask = not_terminated
-                    else:
-                        # Create mask with same number of dimensions as the values
-                        mask_shape = (batch_size,) + (1,) * (old_val.ndim - 1)
-                        mask = not_terminated.reshape(mask_shape)
-                    return jnp.where(mask, new_val, old_val)
-
-                state = jax.tree_util.tree_map(selective_update, state, new_state)
+                # Step all games, PGX env will avoid stepping terminated games for us.
+                state = jax.vmap(env.step)(state, action)
                 R = R + state.rewards[jnp.arange(batch_size), my_player]
                 return (key, state, R, step_count + 1)
 

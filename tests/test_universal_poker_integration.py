@@ -574,6 +574,111 @@ END GAMEDEF"""
         assert state.round == 1, "Should advance to flop after all players call"
         assert state.bets[1] == 0, "Bets should reset to 0 for new round"
 
+    def test_repeated_step_on_terminated_game(self):
+        """Test that calling env.step() multiple times on terminated games returns zero rewards."""
+
+        # Test scenario 1: Two-player game ending by fold
+        env = universal_poker.UniversalPoker(num_players=2)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        # Play until one player folds (force termination)
+        steps = 0
+        max_steps = 100
+        while not state.terminated and steps < max_steps:
+            # Get legal actions
+            legal_actions = jnp.where(state.legal_action_mask)[0]
+            if len(legal_actions) > 0:
+                # Force a fold on the first move to terminate quickly
+                if steps == 0:
+                    action = universal_poker.FOLD
+                else:
+                    # Otherwise pick random legal action
+                    key, subkey = jax.random.split(key)
+                    action = jax.random.choice(subkey, legal_actions)
+                state = env.step(state, action)
+            else:
+                break
+            steps += 1
+
+        # Ensure game terminated
+        assert state.terminated, f"Game should be terminated after {steps} steps"
+
+        # Capture the final rewards when game first terminated
+        final_rewards = state.rewards.copy()
+
+        # Verify that at least one player has non-zero reward (winner gets positive, loser gets negative)
+        total_reward = jnp.sum(jnp.abs(final_rewards))
+        assert total_reward > 0, f"Should have non-zero total rewards at termination, got {final_rewards}"
+
+        # Now call env.step() multiple times on the terminated game
+        for i in range(5):
+            # Try different actions
+            action = i % env.action_space_size
+            new_state = env.step(state, action)
+
+            # State should remain terminated
+            assert new_state.terminated, f"State should remain terminated on step {i+1}"
+
+            # Most importantly: rewards should be ZERO after subsequent steps
+            assert jnp.allclose(
+                new_state.rewards, 0.0
+            ), f"Step {i+1} on terminated game should return zero rewards, got {new_state.rewards}"
+
+            # All other state components should remain unchanged
+            # (except rewards which should be zero)
+            assert jnp.array_equal(
+                new_state.stacks, state.stacks
+            ), f"Stacks should not change on terminated game step {i+1}"
+            assert new_state.pot == state.pot, f"Pot should not change on terminated game step {i+1}"
+            assert jnp.array_equal(
+                new_state.folded, state.folded
+            ), f"Folded status should not change on terminated game step {i+1}"
+
+        # Test scenario 2: Multi-player game ending at showdown
+        config_str = """GAMEDEF
+numplayers = 3  
+stack = 1000 1000 1000
+blind = 5 10 0
+END GAMEDEF"""
+
+        env_multi = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
+        key = jax.random.PRNGKey(123)
+        state = env_multi.init(key)
+
+        # Play to completion (allowing natural showdown)
+        steps = 0
+        max_steps = 200
+        while not state.terminated and steps < max_steps:
+            legal_actions = jnp.where(state.legal_action_mask)[0]
+            if len(legal_actions) > 0:
+                # Use mostly CALL actions to reach showdown
+                if universal_poker.CALL in legal_actions:
+                    action = universal_poker.CALL
+                else:
+                    key, subkey = jax.random.split(key)
+                    action = jax.random.choice(subkey, legal_actions)
+                state = env_multi.step(state, action)
+            else:
+                break
+            steps += 1
+
+        # If we reached termination, test the zero-reward behavior
+        if state.terminated:
+            final_rewards_multi = state.rewards.copy()
+
+            # Call step multiple times and verify zero rewards
+            for i in range(3):
+                action = i % env_multi.action_space_size
+                new_state = env_multi.step(state, action)
+
+                assert new_state.terminated, f"Multi-player game should remain terminated on step {i+1}"
+                assert jnp.allclose(
+                    new_state.rewards, 0.0
+                ), f"Multi-player step {i+1} on terminated game should return zero rewards, got {new_state.rewards}"
+
+        print(f"✓ Terminated game step behavior test completed successfully")
+
 
 if __name__ == "__main__":
     import sys
