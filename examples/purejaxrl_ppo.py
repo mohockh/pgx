@@ -112,7 +112,7 @@ def make_train(config):
         config["NUM_ENVS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
     )
 
-    # Create the environment
+    # Create the base environment (we'll wrap it with policies later in train())
     config_str = """GAMEDEF
 numplayers 8
 numrounds 4
@@ -121,7 +121,8 @@ blind 1 2 0 0 0 0 0 0
 stack 100 100 100 100 100 100 100 100
 END GAMEDEF"""
     base_env = universal_poker.UniversalPoker(num_players=8, config_str=config_str)
-    env = SinglePlayerWrapper(base_env, active_player_id=0)
+    num_players = 8
+    active_player_id = 0
 
 
     def linear_schedule(count):
@@ -135,11 +136,11 @@ END GAMEDEF"""
     def train(rng):
         # INIT NETWORK
         network = ActorCritic(
-            env.num_actions, activation=config["ACTIVATION"]
+            base_env.num_actions, activation=config["ACTIVATION"]
         )
         rng, _rng = jax.random.split(rng)
-        dummy_state = env.init(jax.random.PRNGKey(0))
-        init_x = dummy_state.observation
+        dummy_state = base_env.init(jax.random.PRNGKey(0))
+        init_x = base_env.observe(dummy_state, active_player_id)
         network_params = network.init(_rng, init_x)
         if config["ANNEAL_LR"]:
             tx = optax.chain(
@@ -155,6 +156,15 @@ END GAMEDEF"""
             apply_fn=network.apply,
             params=network_params,
             tx=tx,
+        )
+
+        # For self-play with lagged opponents, use random opponents for now
+        # TODO: Implement proper lagged opponent network - requires passing params through env
+        env = SinglePlayerWrapper(
+            base_env,
+            num_players=num_players,
+            active_player_id=active_player_id,
+            opponent_policy_fns=None  # Random opponents
         )
 
         # INIT ENV
@@ -391,6 +401,7 @@ if __name__ == "__main__":
         "ENV_NAME": "CartPole-v1",
         "ANNEAL_LR": True,
         "DEBUG": True,
+        "OPPONENT_LAG_UPDATES": 10,  # Number of updates opponents lag behind
     }
     rng = jax.random.PRNGKey(30)
     train_jit = jax.jit(make_train(config))

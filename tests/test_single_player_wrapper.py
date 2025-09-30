@@ -14,7 +14,7 @@ class TestSinglePlayerWrapperBasics:
     def test_init_basic(self):
         """Test that wrapper initializes correctly."""
         env = KuhnPoker()
-        wrapper = SinglePlayerWrapper(env, active_player_id=0)
+        wrapper = SinglePlayerWrapper(env, num_players=2, active_player_id=0)
 
         assert wrapper is not None
         assert wrapper.env == env
@@ -25,7 +25,7 @@ class TestSinglePlayerWrapperBasics:
     def test_init_returns_active_player_observation(self):
         """Test that init returns state with observation for active player."""
         env = KuhnPoker()
-        wrapper = SinglePlayerWrapper(env, active_player_id=0)
+        wrapper = SinglePlayerWrapper(env, num_players=2, active_player_id=0)
 
         # Initialize the wrapper
         key = jax.random.PRNGKey(42)
@@ -46,7 +46,7 @@ class TestSinglePlayerWrapperBasics:
     def test_step_executes_active_player_action(self):
         """Test that step executes the active player's action."""
         env = KuhnPoker()
-        wrapper = SinglePlayerWrapper(env, active_player_id=0)
+        wrapper = SinglePlayerWrapper(env, num_players=2, active_player_id=0)
 
         key = jax.random.PRNGKey(42)
         state = wrapper.init(key)
@@ -66,7 +66,7 @@ class TestSinglePlayerWrapperBasics:
     def test_step_auto_plays_opponent_turns(self):
         """Test that step automatically plays opponent turns."""
         env = KuhnPoker()
-        wrapper = SinglePlayerWrapper(env, active_player_id=0)
+        wrapper = SinglePlayerWrapper(env, num_players=2, active_player_id=0)
 
         key = jax.random.PRNGKey(42)
         state = wrapper.init(key)
@@ -89,7 +89,7 @@ class TestSinglePlayerWrapperBasics:
     def test_observation_always_for_active_player(self):
         """Test that observation is always for active player."""
         env = KuhnPoker()
-        wrapper = SinglePlayerWrapper(env, active_player_id=0)
+        wrapper = SinglePlayerWrapper(env, num_players=2, active_player_id=0)
 
         key = jax.random.PRNGKey(42)
         state = wrapper.init(key)
@@ -107,7 +107,7 @@ class TestSinglePlayerWrapperBasics:
     def test_reward_accumulation(self):
         """Test that rewards accumulate correctly across turns."""
         env = KuhnPoker()
-        wrapper = SinglePlayerWrapper(env, active_player_id=0)
+        wrapper = SinglePlayerWrapper(env, num_players=2, active_player_id=0)
 
         key = jax.random.PRNGKey(42)
         state = wrapper.init(key)
@@ -152,7 +152,7 @@ class TestSinglePlayerWrapperBasics:
     def test_game_termination(self):
         """Test that termination flag propagates correctly."""
         env = KuhnPoker()
-        wrapper = SinglePlayerWrapper(env, active_player_id=0)
+        wrapper = SinglePlayerWrapper(env, num_players=2, active_player_id=0)
 
         key = jax.random.PRNGKey(123)
         state = wrapper.init(key)
@@ -175,7 +175,7 @@ class TestSinglePlayerWrapperBasics:
         """Test that default random policy works."""
         env = KuhnPoker()
         # Don't provide opponent_policy_fn - should use random
-        wrapper = SinglePlayerWrapper(env, active_player_id=0, opponent_policy_fn=None)
+        wrapper = SinglePlayerWrapper(env, num_players=2, active_player_id=0, opponent_policy_fns=None)
 
         key = jax.random.PRNGKey(42)
         state = wrapper.init(key)
@@ -195,7 +195,7 @@ class TestSinglePlayerWrapperEdgeCases:
     def test_immediate_termination(self):
         """Test game that terminates on first action."""
         env = KuhnPoker()
-        wrapper = SinglePlayerWrapper(env, active_player_id=0)
+        wrapper = SinglePlayerWrapper(env, num_players=2, active_player_id=0)
 
         # Try with different seeds to find immediate termination
         for seed in range(10):
@@ -221,7 +221,7 @@ class TestSinglePlayerWrapperEdgeCases:
             return jnp.int32(1)  # PASS action
 
         wrapper = SinglePlayerWrapper(
-            env, active_player_id=0, opponent_policy_fn=always_pass_policy
+            env, num_players=2, active_player_id=0, opponent_policy_fns=[None, always_pass_policy]
         )
 
         key = jax.random.PRNGKey(42)
@@ -241,7 +241,7 @@ class TestSinglePlayerWrapperJAX:
     def test_jit_compilation(self):
         """Test that wrapper is JIT-compilable."""
         env = KuhnPoker()
-        wrapper = SinglePlayerWrapper(env, active_player_id=0)
+        wrapper = SinglePlayerWrapper(env, num_players=2, active_player_id=0)
 
         # JIT compile init and step
         jit_init = jax.jit(wrapper.init)
@@ -258,7 +258,7 @@ class TestSinglePlayerWrapperJAX:
     def test_vmap_compatibility(self):
         """Test that wrapper works with vmap (batched envs)."""
         env = KuhnPoker()
-        wrapper = SinglePlayerWrapper(env, active_player_id=0)
+        wrapper = SinglePlayerWrapper(env, num_players=2, active_player_id=0)
 
         # Create batch of keys
         batch_size = 4
@@ -336,7 +336,7 @@ blind 1 2 0 0 0 0 0 0
 stack 100 100 100 100 100 100 100 100
 END GAMEDEF"""
         env = UniversalPoker(num_players=8, config_str=config_str)
-        wrapper = SinglePlayerWrapper(env, active_player_id=0)
+        wrapper = SinglePlayerWrapper(env, num_players=8, active_player_id=0)
 
         key = jax.random.PRNGKey(42)
         state = wrapper.init(key)
@@ -360,7 +360,7 @@ blind 1 2
 stack 100 100
 END GAMEDEF"""
         env = UniversalPoker(num_players=2, config_str=config_str)
-        wrapper = SinglePlayerWrapper(env, active_player_id=0)
+        wrapper = SinglePlayerWrapper(env, num_players=2, active_player_id=0)
 
         key = jax.random.PRNGKey(42)
         state = wrapper.init(key)
@@ -413,7 +413,7 @@ blind 1 2
 stack 100 100
 END GAMEDEF"""
         env = UniversalPoker(num_players=2, config_str=config_str)
-        wrapper = SinglePlayerWrapper(env, active_player_id=0)
+        wrapper = SinglePlayerWrapper(env, num_players=2, active_player_id=0)
 
         # Test JIT
         jit_init = jax.jit(wrapper.init)
