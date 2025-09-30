@@ -10,16 +10,42 @@ import distrax
 from pydantic import BaseModel
 from pgx import universal_poker
 from pgx.single_player_wrapper import SinglePlayerWrapper
+from pgx.poker_eval.cardset import cardset_to_cards
+import collections
 #import gymnax
 #from wrappers import LogWrapper, FlattenObservationWrapper
 
 
-# Global reference for opponent parameters
-# This will be updated between training iterations (outside JIT)
-class OpponentParams:
-    """Container for opponent network parameters."""
-    params = None
-    network_apply = None
+@jax.jit
+def cardset_to_onehot(cardset: jnp.ndarray) -> jnp.ndarray:
+    """Convert uint32[2] cardset to one-hot (52,) encoding.
+
+    Args:
+        cardset: uint32[2] array representing a set of cards
+
+    Returns:
+        One-hot encoded array of shape (52,) with 1.0 at positions of cards in the set
+    """
+    # Initialize one-hot vector for all 52 cards
+    onehot = jnp.zeros(52, dtype=jnp.float32)
+
+    # Check each possible card (0-51) and set bit if present in cardset
+    for card_id in range(52):
+        # ACPC bit position: (suit << 4) + rank
+        bit_pos = (card_id // 13) * 16 + (card_id % 13)
+
+        # Check if this bit is set in the cardset
+        # For bit_pos < 32, check cardset[0], else check cardset[1]
+        word_idx = bit_pos // 32
+        bit_in_word = bit_pos % 32
+
+        # Extract the bit
+        is_set = (cardset[word_idx] >> bit_in_word) & jnp.uint32(1)
+
+        # Set the corresponding position in one-hot
+        onehot = onehot.at[card_id].set(is_set.astype(jnp.float32))
+
+    return onehot
 
 
 class PokerConfig(BaseModel):
@@ -74,13 +100,54 @@ class ActorCritic(nn.Module):
             activation = nn.relu
         else:
             activation = nn.tanh
+
+        # Handle both batched and unbatched inputs
+        # x can be shape (obs_size,) or (batch, obs_size)
+        is_batched = x.ndim > 1
+
+        if is_batched:
+            # Process batch of observations
+            # x shape: (batch, obs_size)
+            # Parse observation: [hole_cardset[2], board_cardset[2], other_features...]
+            hole_cardsets = x[:, :2].astype(jnp.uint32)  # (batch, 2)
+            visible_board_cardsets = x[:, 2:4].astype(jnp.uint32)  # (batch, 2)
+            other_features = x[:, 4:]  # (batch, remaining)
+
+            # Convert cardsets to one-hot encodings (vectorized over batch)
+            hole_onehots = jax.vmap(cardset_to_onehot)(hole_cardsets)  # (batch, 52)
+            board_onehots = jax.vmap(cardset_to_onehot)(visible_board_cardsets)  # (batch, 52)
+        else:
+            # Process single observation
+            # x shape: (obs_size,)
+            hole_cardset = x[:2].astype(jnp.uint32)  # (2,)
+            visible_board_cardset = x[2:4].astype(jnp.uint32)  # (2,)
+            other_features = x[4:]  # (remaining,)
+
+            # Convert cardsets to one-hot encodings
+            hole_onehots = cardset_to_onehot(hole_cardset)  # (52,)
+            board_onehots = cardset_to_onehot(visible_board_cardset)  # (52,)
+
+        # Embed the card representations
+        hole_embed = nn.Dense(
+            16, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(hole_onehots)
+        hole_embed = activation(hole_embed)
+
+        board_embed = nn.Dense(
+            16, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(board_onehots)
+        board_embed = activation(board_embed)
+
+        # Concatenate embeddings with other features
+        x = jnp.concatenate([hole_embed, board_embed, other_features], axis=-1)
+
         actor_mean = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            32, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(x)
         actor_mean = activation(actor_mean)
         actor_mean = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(actor_mean)
+            32, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(actor_mean) + actor_mean
         actor_mean = activation(actor_mean)
         actor_mean = nn.Dense(
             self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
@@ -88,12 +155,12 @@ class ActorCritic(nn.Module):
         pi = distrax.Categorical(logits=actor_mean)
 
         critic = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            32, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(x)
         critic = activation(critic)
         critic = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(critic)
+            32, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+        )(critic) + critic
         critic = activation(critic)
         critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
             critic
@@ -141,50 +208,42 @@ END GAMEDEF"""
         )
         return config["LR"] * frac
 
-    def train(rng):
-        # INIT NETWORK
-        network = ActorCritic(
-            base_env.num_actions, activation=config["ACTIVATION"]
-        )
-        rng, _rng = jax.random.split(rng)
-        dummy_state = base_env.init(jax.random.PRNGKey(0))
-        init_x = base_env.observe(dummy_state, active_player_id)
-        network_params = network.init(_rng, init_x)
-        if config["ANNEAL_LR"]:
-            tx = optax.chain(
-                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                optax.adam(learning_rate=linear_schedule, eps=1e-5),
-            )
-        else:
-            tx = optax.chain(
-                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                optax.adam(config["LR"], eps=1e-5),
-            )
-        train_state = TrainState.create(
-            apply_fn=network.apply,
-            params=network_params,
-            tx=tx,
-        )
+    # Define opponent network policy function
+    def opponent_network_policy(params, obs, rng):
+        """Opponent policy using the same network architecture as the agent."""
+        network = ActorCritic(base_env.num_actions, activation=config["ACTIVATION"])
+        pi, _ = network.apply(params, obs)
+        return pi.sample(seed=rng)
 
-        # TODO: Implement lagged opponent policies properly
-        # The challenge is that JAX JIT requires pure functions, but we need to
-        # update opponent params between training iterations.
-        # Potential solutions:
-        # 1. Modify SinglePlayerWrapper to accept params in its state
-        # 2. Use host callback (jax.experimental.io_callback) to read global params
-        # 3. Manually handle opponent turns outside the wrapper
-        # For now, using random opponents as baseline
+    def train_chunk(agent_train_state, opponent_params, rng):
+        """JIT-compiled training chunk with fixed opponent parameters.
+
+        Args:
+            agent_train_state: Current training state for the agent
+            opponent_params: Fixed opponent network parameters for this chunk
+            rng: Random key
+
+        Returns:
+            Updated agent training state and metrics
+        """
+        # Create environment with opponent network function
         env = SinglePlayerWrapper(
             base_env,
             num_players=num_players,
             active_player_id=active_player_id,
-            opponent_policy_fns=None  # Use random opponents
+            opponent_network_fn=opponent_network_policy,
+            max_steps_per_turn=1000
         )
 
-        # INIT ENV
+        network = ActorCritic(base_env.num_actions, activation=config["ACTIVATION"])
+
+        # INIT ENV with opponent parameters
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
-        env_state = jax.vmap(env.init)(reset_rng)
+        # Use init_with_opponent_params to create SPWState
+        env_state = jax.vmap(env.init_with_opponent_params, in_axes=(0, None))(
+            reset_rng, opponent_params
+        )
         obsv = env_state.observation
 
         # TRAIN LOOP
@@ -199,10 +258,10 @@ END GAMEDEF"""
                 action = pi.sample(seed=_rng)
                 log_prob = pi.log_prob(action)
 
-                # STEP ENV
+                # STEP ENV - use step_with_opponent_params for SPWState
                 rng, _rng = jax.random.split(rng)
                 reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
-                env_state = jax.vmap(env.step)(env_state, action)
+                env_state = jax.vmap(env.step_with_opponent_params)(env_state, action)
 
                 # Extract data from PGX state
                 obsv = env_state.observation
@@ -212,10 +271,10 @@ END GAMEDEF"""
                 done = env_state.terminated
                 info = {}  # PGX doesn't use info dict
 
-                # Auto-reset terminated environments
+                # Auto-reset terminated environments - use init_with_opponent_params for SPWState
                 env_state = jax.vmap(lambda s, rng: jax.lax.cond(
                     s.terminated,
-                    lambda: env.init(rng),
+                    lambda: env.init_with_opponent_params(rng, opponent_params),
                     lambda: s
                 ))(env_state, reset_rng)
                 # Update observation after potential reset
@@ -387,24 +446,91 @@ END GAMEDEF"""
             runner_state = (train_state, env_state, last_obs, rng)
             return runner_state, metric
 
+        # Run the update step for one chunk
         rng, _rng = jax.random.split(rng)
-        runner_state = (train_state, env_state, obsv, _rng)
+        runner_state = (agent_train_state, env_state, obsv, _rng)
         runner_state, metric = jax.lax.scan(
-            _update_step, runner_state, jnp.arange(config["NUM_UPDATES"])
+            _update_step, runner_state, jnp.arange(config["CHUNK_SIZE"])
         )
-        return {"runner_state": runner_state, "metrics": metric}
+        train_state = runner_state[0]
+        return train_state, metric
+
+    def train(rng):
+        """Outer training loop (not JIT-compiled) that manages opponent policies."""
+        # INIT NETWORK
+        network = ActorCritic(
+            base_env.num_actions, activation=config["ACTIVATION"]
+        )
+        rng, _rng = jax.random.split(rng)
+        dummy_state = base_env.init(jax.random.PRNGKey(0))
+        init_x = base_env.observe(dummy_state, active_player_id)
+        network_params = network.init(_rng, init_x)
+        if config["ANNEAL_LR"]:
+            tx = optax.chain(
+                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+                optax.adam(learning_rate=linear_schedule, eps=1e-5),
+            )
+        else:
+            tx = optax.chain(
+                optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
+                optax.adam(config["LR"], eps=1e-5),
+            )
+        train_state = TrainState.create(
+            apply_fn=network.apply,
+            params=network_params,
+            tx=tx,
+        )
+
+        # Initialize opponent parameters and history
+        opponent_params = network_params  # Start with initial network params
+        opponent_history = collections.deque(maxlen=config.get("OPPONENT_HISTORY_SIZE", 100))
+        opponent_history.append(network_params)
+
+        # JIT compile the training chunk
+        train_chunk_jit = jax.jit(train_chunk)
+
+        # Outer loop: iterate through chunks, updating opponent params between chunks
+        num_chunks = int(config["NUM_UPDATES"] // config["CHUNK_SIZE"])
+        all_metrics = []
+
+        for chunk_idx in range(num_chunks):
+            # Update opponent parameters every OPPONENT_LAG_UPDATES chunks
+            if chunk_idx > 0 and chunk_idx % config.get("OPPONENT_LAG_UPDATES", 1) == 0:
+                # Select a random past policy from history
+                if len(opponent_history) > 1:
+                    rng, _rng = jax.random.split(rng)
+                    history_idx = jax.random.randint(
+                        _rng, shape=(), minval=0, maxval=len(opponent_history)
+                    )
+                    opponent_params = opponent_history[int(history_idx)]
+                else:
+                    opponent_params = train_state.params
+
+            # Store current agent params in history
+            opponent_history.append(train_state.params)
+
+            # Run JIT-compiled training chunk
+            rng, _rng = jax.random.split(rng)
+            train_state, metrics = train_chunk_jit(train_state, opponent_params, _rng)
+            all_metrics.append(metrics)
+
+            # Optional: logging outside JIT
+            if config.get("DEBUG") and chunk_idx % config.get("LOG_INTERVAL", 10) == 0:
+                print(f"Chunk {chunk_idx + 1}/{num_chunks} completed")
+
+        return {"train_state": train_state, "metrics": all_metrics}
 
     return train
 
 
 if __name__ == "__main__":
     config = {
-        "LR": 2.5e-4,
-        "NUM_ENVS": 4,
-        "NUM_STEPS": 128,
-        "TOTAL_TIMESTEPS": 5e5,
-        "UPDATE_EPOCHS": 4,
-        "NUM_MINIBATCHES": 4,
+        "LR": 2.5e-3,
+        "NUM_ENVS": 64,
+        "NUM_STEPS": 1024,
+        "TOTAL_TIMESTEPS": 1e7,
+        "UPDATE_EPOCHS": 1,
+        "NUM_MINIBATCHES": 64,
         "GAMMA": 0.99,
         "GAE_LAMBDA": 0.95,
         "CLIP_EPS": 0.2,
@@ -412,11 +538,13 @@ if __name__ == "__main__":
         "VF_COEF": 0.5,
         "MAX_GRAD_NORM": 0.5,
         "ACTIVATION": "tanh",
-        "ENV_NAME": "CartPole-v1",
         "ANNEAL_LR": True,
         "DEBUG": True,
-        "OPPONENT_LAG_UPDATES": 10,  # Number of updates opponents lag behind
+        "CHUNK_SIZE": 10,  # Number of updates per JIT-compiled chunk
+        "OPPONENT_LAG_UPDATES": 1,  # Number of chunks between opponent policy updates
+        "OPPONENT_HISTORY_SIZE": 3,  # Max number of past policies to keep
+        "LOG_INTERVAL": 1,  # Log every N chunks
     }
     rng = jax.random.PRNGKey(30)
-    train_jit = jax.jit(make_train(config))
-    out = train_jit(rng)
+    train_fn = make_train(config)
+    out = train_fn(rng)
