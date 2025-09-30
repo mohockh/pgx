@@ -176,6 +176,8 @@ END GAMEDEF"""
                 log_prob = pi.log_prob(action)
 
                 # STEP ENV
+                rng, _rng = jax.random.split(rng)
+                reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
                 env_state = jax.vmap(env.step)(env_state, action)
 
                 # Extract data from PGX state
@@ -185,6 +187,15 @@ END GAMEDEF"""
                 reward = env_state.rewards[:, env.active_player_id]
                 done = env_state.terminated
                 info = {}  # PGX doesn't use info dict
+
+                # Auto-reset terminated environments
+                env_state = jax.vmap(lambda s, rng: jax.lax.cond(
+                    s.terminated,
+                    lambda: env.init(rng),
+                    lambda: s
+                ))(env_state, reset_rng)
+                # Update observation after potential reset
+                obsv = env_state.observation
 
                 transition = Transition(
                     done, action, value, reward, log_prob, last_obs, info
@@ -326,6 +337,13 @@ END GAMEDEF"""
                     min_return = episode_returns.min()
                     total_episodes = episode_lengths.sum()
 
+                    # Count positive/negative/zero rewards across ALL timesteps and envs
+                    all_rewards = traj_batch.reward.flatten()
+                    num_positive = (all_rewards > 0).sum()
+                    num_negative = (all_rewards < 0).sum()
+                    num_zero = (all_rewards == 0).sum()
+                    num_nonzero = (all_rewards != 0).sum()
+
                     # Extract loss info (last epoch's last minibatch)
                     total_loss, (value_loss, policy_loss, entropy) = loss_info
 
@@ -335,6 +353,7 @@ END GAMEDEF"""
                     print(f"Update {int(update_idx):4d} | Step {int(global_step):7d} | "
                           f"Return: {mean_return:7.2f} (min={min_return:7.2f}, max={max_return:7.2f}) | "
                           f"Episodes: {int(total_episodes):3d} | "
+                          f"Rewards: +{int(num_positive)} -{int(num_negative)} 0:{int(num_zero)} | "
                           f"VLoss: {value_loss[-1].mean():.4f} | "
                           f"PLoss: {policy_loss[-1].mean():.4f} | "
                           f"Entropy: {entropy[-1].mean():.4f}")
