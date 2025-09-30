@@ -112,14 +112,42 @@ class TestSinglePlayerWrapperBasics:
         key = jax.random.PRNGKey(42)
         state = wrapper.init(key)
 
-        # Take an action and check reward
-        action = jnp.int32(0)  # BET
-        new_state = wrapper.step(state, action)
+        # Loop until termination or max steps
+        max_steps = 100
+        total_accumulated_reward = 0.0
 
-        # Reward should be set (possibly 0 if game continues, or final if terminated)
-        reward = new_state.rewards[wrapper.active_player_id]
-        # Just verify it's a valid number
-        assert jnp.isfinite(reward)
+        print(f"\n--- Reward Accumulation Test ---")
+        print(f"Initial state - All player rewards: {state.rewards}")
+        print(f"Initial state - Active player ({wrapper.active_player_id}) reward: {state.rewards[wrapper.active_player_id]}")
+
+        for step in range(max_steps):
+            if state.terminated:
+                break
+
+            # Take random legal action
+            legal_actions = jnp.where(state.legal_action_mask)[0]
+            action = legal_actions[0] if len(legal_actions) > 0 else jnp.int32(0)
+
+            state = wrapper.step(state, action)
+            step_reward = state.rewards[wrapper.active_player_id]
+            total_accumulated_reward += step_reward
+
+            print(f"Step {step + 1} - All player rewards: {state.rewards}")
+            print(f"Step {step + 1} - Active player ({wrapper.active_player_id}) reward: {step_reward}")
+            print(f"Step {step + 1} - Total accumulated: {total_accumulated_reward}")
+            print(f"Step {step + 1} - Terminated: {state.terminated}")
+
+        # Game should terminate
+        assert state.terminated, "Game should terminate within max_steps"
+
+        # Final reward should be set and finite
+        final_reward = state.rewards[wrapper.active_player_id]
+        assert jnp.isfinite(final_reward)
+
+        print(f"\nFinal - All player rewards: {state.rewards}")
+        print(f"Final - Active player ({wrapper.active_player_id}) reward: {final_reward}")
+        print(f"Final - Total accumulated reward: {total_accumulated_reward}")
+        print(f"--- End Reward Accumulation Test ---\n")
 
     def test_game_termination(self):
         """Test that termination flag propagates correctly."""
@@ -337,8 +365,13 @@ END GAMEDEF"""
         key = jax.random.PRNGKey(42)
         state = wrapper.init(key)
 
+        print(f"\n--- Universal Poker Full Game Test ---")
+        print(f"Initial state - All player rewards: {state.rewards}")
+        print(f"Initial state - Active player ({wrapper.active_player_id}) reward: {state.rewards[wrapper.active_player_id]}")
+
         # Play until termination
         max_steps = 100  # Safety limit
+        total_accumulated_reward = 0.0
         for step in range(max_steps):
             if state.terminated:
                 break
@@ -351,6 +384,13 @@ END GAMEDEF"""
                 action = jnp.int32(0)
 
             state = wrapper.step(state, action)
+            step_reward = state.rewards[wrapper.active_player_id]
+            total_accumulated_reward += step_reward
+
+            print(f"Step {step + 1} - All player rewards: {state.rewards}")
+            print(f"Step {step + 1} - Active player ({wrapper.active_player_id}) reward: {step_reward}")
+            print(f"Step {step + 1} - Total accumulated: {total_accumulated_reward}")
+            print(f"Step {step + 1} - Terminated: {state.terminated}")
 
         # Game should terminate
         assert state.terminated
@@ -358,6 +398,11 @@ END GAMEDEF"""
         # Final reward should be set
         reward = state.rewards[wrapper.active_player_id]
         assert jnp.isfinite(reward)
+
+        print(f"\nFinal - All player rewards: {state.rewards}")
+        print(f"Final - Active player ({wrapper.active_player_id}) reward: {reward}")
+        print(f"Final - Total accumulated reward: {total_accumulated_reward}")
+        print(f"--- End Universal Poker Full Game Test ---\n")
 
     def test_universal_poker_jit_and_vmap(self):
         """Test JIT and vmap with UniversalPoker."""

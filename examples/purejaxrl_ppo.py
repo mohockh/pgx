@@ -9,6 +9,7 @@ from flax.training.train_state import TrainState
 import distrax
 from pydantic import BaseModel
 from pgx import universal_poker
+from pgx.single_player_wrapper import SinglePlayerWrapper
 #import gymnax
 #from wrappers import LogWrapper, FlattenObservationWrapper
 
@@ -110,9 +111,7 @@ def make_train(config):
     config["MINIBATCH_SIZE"] = (
         config["NUM_ENVS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
     )
-#    env, env_params = gymnax.make(config["ENV_NAME"])
-#env = FlattenObservationWrapper(env)
-#env = LogWrapper(env)
+
     # Create the environment
     config_str = """GAMEDEF
 numplayers 8
@@ -121,7 +120,8 @@ firstplayer 3 1 1 1
 blind 1 2 0 0 0 0 0 0
 stack 100 100 100 100 100 100 100 100
 END GAMEDEF"""
-    env = universal_poker.UniversalPoker(num_players=8, config_str=config_str)
+    base_env = universal_poker.UniversalPoker(num_players=8, config_str=config_str)
+    env = SinglePlayerWrapper(base_env, active_player_id=0)
 
 
     def linear_schedule(count):
@@ -138,7 +138,8 @@ END GAMEDEF"""
             env.num_actions, activation=config["ACTIVATION"]
         )
         rng, _rng = jax.random.split(rng)
-        init_x = jnp.zeros(env.observation_space(env_params).shape)
+        dummy_state = env.init(jax.random.PRNGKey(0))
+        init_x = dummy_state.observation
         network_params = network.init(_rng, init_x)
         if config["ANNEAL_LR"]:
             tx = optax.chain(
@@ -159,10 +160,11 @@ END GAMEDEF"""
         # INIT ENV
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, config["NUM_ENVS"])
-        obsv, env_state = jax.vmap(env.reset, in_axes=(0, None))(reset_rng, env_params)
+        env_state = jax.vmap(env.init)(reset_rng)
+        obsv = env_state.observation
 
         # TRAIN LOOP
-        def _update_step(runner_state, unused):
+        def _update_step(runner_state, update_idx):
             # COLLECT TRAJECTORIES
             def _env_step(runner_state, unused):
                 train_state, env_state, last_obs, rng = runner_state
@@ -174,11 +176,16 @@ END GAMEDEF"""
                 log_prob = pi.log_prob(action)
 
                 # STEP ENV
-                rng, _rng = jax.random.split(rng)
-                rng_step = jax.random.split(_rng, config["NUM_ENVS"])
-                obsv, env_state, reward, done, info = jax.vmap(
-                    env.step, in_axes=(0, 0, 0, None)
-                )(rng_step, env_state, action, env_params)
+                env_state = jax.vmap(env.step)(env_state, action)
+
+                # Extract data from PGX state
+                obsv = env_state.observation
+                # SinglePlayerWrapper puts the active player's cumulative reward at index active_player_id
+                # env_state.rewards has shape (num_envs, num_players), we want (num_envs,)
+                reward = env_state.rewards[:, env.active_player_id]
+                done = env_state.terminated
+                info = {}  # PGX doesn't use info dict
+
                 transition = Transition(
                     done, action, value, reward, log_prob, last_obs, info
                 )
@@ -304,15 +311,35 @@ END GAMEDEF"""
             train_state = update_state[0]
             metric = traj_batch.info
             rng = update_state[-1]
-            
-            # Debugging mode
+
+            # Debugging mode - adapted for PGX
             if config.get("DEBUG"):
-                def callback(info):
-                    return_values = info["returned_episode_returns"][info["returned_episode"]]
-                    timesteps = info["timestep"][info["returned_episode"]] * config["NUM_ENVS"]
-                    for t in range(len(timesteps)):
-                        print(f"global step={timesteps[t]}, episodic return={return_values[t]}")
-                jax.debug.callback(callback, metric)
+                def callback(traj_batch, update_idx, loss_info):
+                    # Calculate trajectory statistics
+                    # Sum rewards across the trajectory for each environment
+                    episode_returns = traj_batch.reward.sum(axis=0)  # Sum over time steps
+                    episode_lengths = traj_batch.done.sum(axis=0)  # Count terminations
+
+                    # Get min/max/mean rewards
+                    mean_return = episode_returns.mean()
+                    max_return = episode_returns.max()
+                    min_return = episode_returns.min()
+                    total_episodes = episode_lengths.sum()
+
+                    # Extract loss info (last epoch's last minibatch)
+                    total_loss, (value_loss, policy_loss, entropy) = loss_info
+
+                    # Calculate global step
+                    global_step = update_idx * config["NUM_ENVS"] * config["NUM_STEPS"]
+
+                    print(f"Update {int(update_idx):4d} | Step {int(global_step):7d} | "
+                          f"Return: {mean_return:7.2f} (min={min_return:7.2f}, max={max_return:7.2f}) | "
+                          f"Episodes: {int(total_episodes):3d} | "
+                          f"VLoss: {value_loss[-1].mean():.4f} | "
+                          f"PLoss: {policy_loss[-1].mean():.4f} | "
+                          f"Entropy: {entropy[-1].mean():.4f}")
+
+                jax.debug.callback(callback, traj_batch, update_idx, loss_info)
 
             runner_state = (train_state, env_state, last_obs, rng)
             return runner_state, metric
@@ -320,7 +347,7 @@ END GAMEDEF"""
         rng, _rng = jax.random.split(rng)
         runner_state = (train_state, env_state, obsv, _rng)
         runner_state, metric = jax.lax.scan(
-            _update_step, runner_state, None, config["NUM_UPDATES"]
+            _update_step, runner_state, jnp.arange(config["NUM_UPDATES"])
         )
         return {"runner_state": runner_state, "metrics": metric}
 

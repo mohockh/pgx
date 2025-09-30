@@ -128,11 +128,10 @@ class SinglePlayerWrapper(core.Env):
             (state, cumulative_reward, key2, jnp.int32(0))
         )
 
-        # Replace the rewards in state with cumulative reward for active player
-        # For single-player interface, we only expose the active player's reward
-        final_rewards = jnp.zeros(state.rewards.shape, dtype=state.rewards.dtype)
-        final_rewards = final_rewards.at[self.active_player_id].set(cumulative_reward)
-        state = state.replace(rewards=final_rewards)  # type: ignore
+        # Update the active player's reward with the cumulative value
+        # Keep other players' rewards from the final state to maintain zero-sum property
+        updated_rewards = state.rewards.at[self.active_player_id].set(cumulative_reward)
+        state = state.replace(rewards=updated_rewards)  # type: ignore
 
         return state
 
