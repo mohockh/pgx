@@ -14,6 +14,14 @@ from pgx.single_player_wrapper import SinglePlayerWrapper
 #from wrappers import LogWrapper, FlattenObservationWrapper
 
 
+# Global reference for opponent parameters
+# This will be updated between training iterations (outside JIT)
+class OpponentParams:
+    """Container for opponent network parameters."""
+    params = None
+    network_apply = None
+
+
 class PokerConfig(BaseModel):
     """Configuration for Universal Poker training."""
 
@@ -158,13 +166,19 @@ END GAMEDEF"""
             tx=tx,
         )
 
-        # For self-play with lagged opponents, use random opponents for now
-        # TODO: Implement proper lagged opponent network - requires passing params through env
+        # TODO: Implement lagged opponent policies properly
+        # The challenge is that JAX JIT requires pure functions, but we need to
+        # update opponent params between training iterations.
+        # Potential solutions:
+        # 1. Modify SinglePlayerWrapper to accept params in its state
+        # 2. Use host callback (jax.experimental.io_callback) to read global params
+        # 3. Manually handle opponent turns outside the wrapper
+        # For now, using random opponents as baseline
         env = SinglePlayerWrapper(
             base_env,
             num_players=num_players,
             active_player_id=active_player_id,
-            opponent_policy_fns=None  # Random opponents
+            opponent_policy_fns=None  # Use random opponents
         )
 
         # INIT ENV
