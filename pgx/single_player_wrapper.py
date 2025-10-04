@@ -21,21 +21,28 @@ class SPWState:
 
     This class wraps a PGX State and adds opponent network parameters
     and RNG keys, allowing JIT-compiled functions to handle dynamic
-    opponent policies.
+    opponent policies.  This minimizes JIT compilation by passing in
+    a fixed pool size of N policies via PyTree, stacked.  At game start,
+    each player is randomly assigned a policy index which is then used
+    to generate actions for each step on their turn.
 
     Attributes:
         pgx_state: Core state from the underlying PGX environment
-        opponent_params: PyTree containing network parameters for all opponent policies
+        opponent_params: PyTree containing network parameters for all opponent policies (or policy pool)
         opponent_policy_rngs: PRNGKey for stochastic opponent policy sampling
+        opponent_policy_indices: Array of policy indices for each player (shape: num_players)
     """
     # Core state from the underlying PGX environment
     pgx_state: core.State
 
-    # Network parameters for all opponent policies
+    # Network parameters for all opponent policies (or policy pool)
     opponent_params: Any  # PyTree
 
     # PRNGKeys for stochastic opponent policies
     opponent_policy_rngs: PRNGKey
+
+    # Policy indices for each opponent (shape: num_players)
+    opponent_policy_indices: Array
 
     # --- Property delegations for compatibility ---
     # This makes SPWState behave like a standard PgxState
@@ -90,6 +97,9 @@ class SinglePlayerWrapper(core.Env):
         opponent_network_fn: Optional network function (params, obs, rng) -> action for opponents.
                            If provided, will be used instead of opponent_policy_fns.
         max_steps_per_turn: Safety limit to prevent infinite loops (default 1000)
+        num_opponent_policies: Number of policies in the opponent_params pool (default 1).
+                           If > 1, opponent_params is expected to be a stacked PyTree with
+                           leading dimension equal to num_opponent_policies.
     """
 
     def __init__(
@@ -100,6 +110,7 @@ class SinglePlayerWrapper(core.Env):
         opponent_policy_fns: Optional[Sequence[Optional[Callable[[Array], Array]]]] = None,
         opponent_network_fn: Optional[Callable[[Any, Array, PRNGKey], Array]] = None,
         max_steps_per_turn: int = 1000,
+        num_opponent_policies: int = 1,
     ):
         super().__init__()
         self.env = env
@@ -107,6 +118,7 @@ class SinglePlayerWrapper(core.Env):
         self.max_steps_per_turn = max_steps_per_turn
         self._num_players = num_players
         self.opponent_network_fn = opponent_network_fn
+        self.num_opponent_policies = num_opponent_policies
 
         # Build array of policy functions, one per player
         self._opponent_policy_fns = []
@@ -128,21 +140,27 @@ class SinglePlayerWrapper(core.Env):
 
         Args:
             key: Random key for initialization
-            initial_opponent_params: Network parameters for opponent policies
+            initial_opponent_params: Network parameters for opponent policies (or policy pool)
 
         Returns:
             SPWState with initialized environment and opponent parameters
         """
-        key1, key2, key3 = jax.random.split(key, 3)
+        key1, key2, key3, key4 = jax.random.split(key, 4)
 
         # Initialize underlying environment
         pgx_state = self.env.init(key1)
+
+        # Randomly assign policy indices to each player
+        opponent_policy_indices = jax.random.randint(
+            key2, shape=(self._num_players,), minval=0, maxval=self.num_opponent_policies
+        )
 
         # Create SPWState
         spw_state = SPWState(
             pgx_state=pgx_state,
             opponent_params=initial_opponent_params,
-            opponent_policy_rngs=key2
+            opponent_policy_rngs=key3,
+            opponent_policy_indices=opponent_policy_indices
         )
 
         # Advance to active player's turn using while_loop
@@ -156,9 +174,16 @@ class SinglePlayerWrapper(core.Env):
             # Split key for opponent policy
             rng_key, subkey1, subkey2 = jax.random.split(rng_key, 3)
 
+            # Extract opponent's policy from pool
+            player_id = spw_state.current_player
+            policy_idx = spw_state.opponent_policy_indices[player_id]
+            opponent_policy = jax.tree_util.tree_map(
+                lambda pool: pool[policy_idx], spw_state.opponent_params
+            )
+
             # Get opponent action using network function
             obs = self.env.observe(spw_state.pgx_state, spw_state.current_player)
-            action = self.opponent_network_fn(spw_state.opponent_params, obs, subkey1)
+            action = self.opponent_network_fn(opponent_policy, obs, subkey1)
 
             # Step environment
             new_pgx_state = self.env.step(spw_state.pgx_state, action)
@@ -175,7 +200,7 @@ class SinglePlayerWrapper(core.Env):
         spw_state, _, _ = jax.lax.while_loop(
             cond_fn,
             body_fn,
-            (spw_state, key3, jnp.int32(0))
+            (spw_state, key4, jnp.int32(0))
         )
 
         return spw_state
@@ -266,9 +291,16 @@ class SinglePlayerWrapper(core.Env):
             # Split key for opponent policy
             rng_key, subkey1, subkey2 = jax.random.split(rng_key, 3)
 
+            # Extract opponent's policy from pool
+            player_id = spw_state.current_player
+            policy_idx = spw_state.opponent_policy_indices[player_id]
+            opponent_policy = jax.tree_util.tree_map(
+                lambda pool: pool[policy_idx], spw_state.opponent_params
+            )
+
             # Get opponent action using network function
             obs = self.env.observe(spw_state.pgx_state, spw_state.current_player)
-            action = self.opponent_network_fn(spw_state.opponent_params, obs, subkey1)
+            action = self.opponent_network_fn(opponent_policy, obs, subkey1)
 
             # Step environment
             new_pgx_state = self.env.step(spw_state.pgx_state, action)

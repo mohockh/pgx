@@ -12,6 +12,7 @@ from pgx import universal_poker
 from pgx.single_player_wrapper import SinglePlayerWrapper
 from pgx.poker_eval.cardset import cardset_to_cards
 import collections
+import random
 #import gymnax
 #from wrappers import LogWrapper, FlattenObservationWrapper
 
@@ -232,7 +233,8 @@ END GAMEDEF"""
             num_players=num_players,
             active_player_id=active_player_id,
             opponent_network_fn=opponent_network_policy,
-            max_steps_per_turn=1000
+            max_steps_per_turn=1000,
+            num_opponent_policies=config.get("OPPONENT_HISTORY_SIZE", 1)
         )
 
         network = ActorCritic(base_env.num_actions, activation=config["ACTIVATION"])
@@ -481,8 +483,7 @@ END GAMEDEF"""
             tx=tx,
         )
 
-        # Initialize opponent parameters and history
-        opponent_params = network_params  # Start with initial network params
+        # Initialize opponent history
         opponent_history = collections.deque(maxlen=config.get("OPPONENT_HISTORY_SIZE", 100))
         opponent_history.append(network_params)
 
@@ -494,24 +495,19 @@ END GAMEDEF"""
         all_metrics = []
 
         for chunk_idx in range(num_chunks):
-            # Update opponent parameters every OPPONENT_LAG_UPDATES chunks
-            if chunk_idx > 0 and chunk_idx % config.get("OPPONENT_LAG_UPDATES", 1) == 0:
-                # Select a random past policy from history
-                if len(opponent_history) > 1:
-                    rng, _rng = jax.random.split(rng)
-                    history_idx = jax.random.randint(
-                        _rng, shape=(), minval=0, maxval=len(opponent_history)
-                    )
-                    opponent_params = opponent_history[int(history_idx)]
-                else:
-                    opponent_params = train_state.params
-
             # Store current agent params in history
             opponent_history.append(train_state.params)
 
-            # Run JIT-compiled training chunk
+            # Create policy pool by sampling from history with replacement
+            pool_size = config.get("OPPONENT_HISTORY_SIZE", 1)
+            sampled_policies = random.choices(list(opponent_history), k=pool_size)
+
+            # Stack policies into a single PyTree (policy pool)
+            policy_pool = jax.tree_util.tree_map(lambda *leaves: jnp.stack(leaves), *sampled_policies)
+
+            # Run JIT-compiled training chunk with policy pool
             rng, _rng = jax.random.split(rng)
-            train_state, metrics = train_chunk_jit(train_state, opponent_params, _rng)
+            train_state, metrics = train_chunk_jit(train_state, policy_pool, _rng)
             all_metrics.append(metrics)
 
             # Optional: logging outside JIT
@@ -527,14 +523,14 @@ if __name__ == "__main__":
     config = {
         "LR": 2.5e-3,
         "NUM_ENVS": 64,
-        "NUM_STEPS": 1024,
+        "NUM_STEPS": 256,
         "TOTAL_TIMESTEPS": 1e7,
         "UPDATE_EPOCHS": 1,
         "NUM_MINIBATCHES": 64,
         "GAMMA": 0.99,
         "GAE_LAMBDA": 0.95,
         "CLIP_EPS": 0.2,
-        "ENT_COEF": 0.01,
+        "ENT_COEF": 0.05,
         "VF_COEF": 0.5,
         "MAX_GRAD_NORM": 0.5,
         "ACTIVATION": "tanh",
@@ -542,7 +538,7 @@ if __name__ == "__main__":
         "DEBUG": True,
         "CHUNK_SIZE": 10,  # Number of updates per JIT-compiled chunk
         "OPPONENT_LAG_UPDATES": 1,  # Number of chunks between opponent policy updates
-        "OPPONENT_HISTORY_SIZE": 3,  # Max number of past policies to keep
+        "OPPONENT_HISTORY_SIZE": 15,  # Max number of past policies to keep
         "LOG_INTERVAL": 1,  # Log every N chunks
     }
     rng = jax.random.PRNGKey(30)
