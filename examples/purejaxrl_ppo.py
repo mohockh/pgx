@@ -13,6 +13,8 @@ from pgx.single_player_wrapper import SinglePlayerWrapper
 from pgx.poker_eval.cardset import cardset_to_cards
 import collections
 import random
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
 #import gymnax
 #from wrappers import LogWrapper, FlattenObservationWrapper
 
@@ -202,6 +204,9 @@ END GAMEDEF"""
     num_players = 8
     active_player_id = 0
 
+    # Module-level writer that will be set in train()
+    tensorboard_writer = None
+
 
     def linear_schedule(count):
         frac = (
@@ -228,6 +233,9 @@ END GAMEDEF"""
 
         Returns:
             Updated agent training state and metrics
+
+        Note:
+            This function captures 'writer' from the enclosing scope for TensorBoard logging
         """
         # Create environment with opponent network function
         env = SinglePlayerWrapper(
@@ -384,7 +392,7 @@ END GAMEDEF"""
                         train_state.params, traj_batch, advantages, targets
                     )
                     train_state = train_state.apply_gradients(grads=grads)
-                    return train_state, total_loss
+                    return train_state, (total_loss, grads)
 
                 train_state, traj_batch, advantages, targets, rng = update_state
                 rng, _rng = jax.random.split(rng)
@@ -408,11 +416,12 @@ END GAMEDEF"""
                     ),
                     shuffled_batch,
                 )
-                train_state, total_loss = jax.lax.scan(
+                train_state, loss_and_grads = jax.lax.scan(
                     _update_minbatch, train_state, minibatches
                 )
+                total_loss, grads = loss_and_grads
                 update_state = (train_state, traj_batch, advantages, targets, rng)
-                return update_state, total_loss
+                return update_state, (total_loss, grads)
             # Updating Training State and Metrics:
             update_state = (train_state, traj_batch, advantages, targets, rng)
             update_state, loss_info = jax.lax.scan(
@@ -424,7 +433,11 @@ END GAMEDEF"""
 
             # Debugging mode - adapted for PGX
             if config.get("DEBUG"):
-                def callback(traj_batch, update_idx, loss_info):
+                def callback(traj_batch, update_idx, loss_and_grad_info):
+                    # Unpack loss and gradient info
+                    (total_loss_info, grad_info) = loss_and_grad_info
+                    total_loss, (value_loss, policy_loss, entropy) = total_loss_info
+
                     # Extract only non-zero episode returns (actual completions)
                     completed_returns = traj_batch.episode_return[traj_batch.episode_return != 0]
                     completed_lengths = traj_batch.episode_length[traj_batch.episode_length != 0]
@@ -445,11 +458,17 @@ END GAMEDEF"""
                     num_negative = (all_rewards < 0).sum()
                     num_zero = (all_rewards == 0).sum()
 
-                    # Extract loss info (last epoch's last minibatch)
-                    total_loss, (value_loss, policy_loss, entropy) = loss_info
-
                     # Calculate global step
                     global_step = update_idx * config["NUM_ENVS"] * config["NUM_STEPS"]
+
+                    # Compute gradient statistics
+                    # grad_info has shape (num_epochs, num_minibatches, ...) - take last epoch, last minibatch
+                    last_grads = jax.tree_util.tree_map(lambda x: x[-1, -1], grad_info)
+
+                    # Compute global gradient norm
+                    grad_norm = jnp.sqrt(sum(
+                        jnp.sum(jnp.square(g)) for g in jax.tree_util.tree_leaves(last_grads)
+                    ))
 
                     print(f"Update {int(update_idx):4d} | Step {int(global_step):7d} | "
                           f"Return: {mean_return:7.2f} (min={min_return:7.2f}, max={max_return:7.2f}) | "
@@ -457,7 +476,52 @@ END GAMEDEF"""
                           f"Rewards: +{int(num_positive)} -{int(num_negative)} 0:{int(num_zero)} | "
                           f"VLoss: {value_loss[-1].mean():.4f} | "
                           f"PLoss: {policy_loss[-1].mean():.4f} | "
-                          f"Entropy: {entropy[-1].mean():.4f}")
+                          f"Entropy: {entropy[-1].mean():.4f} | "
+                          f"GradNorm: {grad_norm:.4f}")
+
+                    # TensorBoard logging
+                    if tensorboard_writer is not None:
+                        # Scalar metrics
+                        tensorboard_writer.add_scalar('metrics/mean_return', float(mean_return), int(global_step))
+                        tensorboard_writer.add_scalar('metrics/mean_episode_length', float(mean_length), int(global_step))
+                        tensorboard_writer.add_scalar('metrics/num_episodes', int(num_episodes), int(global_step))
+                        tensorboard_writer.add_scalar('metrics/positive_rewards', int(num_positive), int(global_step))
+                        tensorboard_writer.add_scalar('metrics/negative_rewards', int(num_negative), int(global_step))
+                        tensorboard_writer.add_scalar('metrics/zero_rewards', int(num_zero), int(global_step))
+
+                        # Histogram distributions
+                        if len(completed_returns) > 0:
+                            tensorboard_writer.add_histogram('distributions/episode_returns',
+                                               np.array(completed_returns), int(global_step))
+
+                        # Loss histograms (across all epochs and minibatches)
+                        tensorboard_writer.add_histogram('distributions/value_loss',
+                                           np.array(value_loss.flatten()), int(global_step))
+                        tensorboard_writer.add_histogram('distributions/policy_loss',
+                                           np.array(policy_loss.flatten()), int(global_step))
+                        tensorboard_writer.add_histogram('distributions/entropy',
+                                           np.array(entropy.flatten()), int(global_step))
+
+                        # Gradient metrics
+                        tensorboard_writer.add_scalar('gradients/grad_norm', float(grad_norm), int(global_step))
+
+                        # Per-parameter gradient norms and histograms
+                        param_grad_norms = []
+                        for path, grad in jax.tree_util.tree_leaves_with_path(last_grads):
+                            # Convert path to string (e.g., 'params/Dense_0/kernel')
+                            path_str = '/'.join(str(k.key) for k in path if hasattr(k, 'key'))
+                            param_norm = jnp.sqrt(jnp.sum(jnp.square(grad)))
+                            param_grad_norms.append(float(param_norm))
+
+                            # Log histogram for this parameter's gradients
+                            if grad.size > 1:  # Only log histograms for non-scalar parameters
+                                tensorboard_writer.add_histogram(f'gradients/{path_str}',
+                                                   np.array(grad.flatten()), int(global_step))
+
+                        # Histogram of all parameter gradient norms
+                        if param_grad_norms:
+                            tensorboard_writer.add_histogram('gradients/param_grad_norms',
+                                               np.array(param_grad_norms), int(global_step))
 
                 jax.debug.callback(callback, traj_batch, update_idx, loss_info)
 
@@ -478,6 +542,8 @@ END GAMEDEF"""
 
     def train(rng):
         """Outer training loop (not JIT-compiled) that manages opponent policies."""
+        nonlocal tensorboard_writer
+
         # INIT NETWORK
         network = ActorCritic(
             base_env.num_actions, activation=config["ACTIVATION"]
@@ -502,12 +568,18 @@ END GAMEDEF"""
             tx=tx,
         )
 
+        # Initialize TensorBoard writer
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        logdir = f"{config.get('TENSORBOARD_DIR', 'runs/ppo_poker')}_{timestamp}"
+        tensorboard_writer = SummaryWriter(logdir)
+        print(f"TensorBoard logs will be saved to: {logdir}")
+
         # Initialize opponent history
         opponent_history = collections.deque(maxlen=config.get("OPPONENT_HISTORY_SIZE", 100))
         opponent_history.append(network_params)
 
         # JIT compile the training chunk
-        train_chunk_jit = jax.jit(train_chunk)
+        train_chunk_compiled = jax.jit(train_chunk)
 
         # Outer loop: iterate through chunks, updating opponent params between chunks
         num_chunks = int(config["NUM_UPDATES"] // config["CHUNK_SIZE"])
@@ -524,14 +596,19 @@ END GAMEDEF"""
             # Stack policies into a single PyTree (policy pool)
             policy_pool = jax.tree_util.tree_map(lambda *leaves: jnp.stack(leaves), *sampled_policies)
 
-            # Run JIT-compiled training chunk with policy pool
+            # Run training chunk with policy pool
             rng, _rng = jax.random.split(rng)
-            train_state, metrics = train_chunk_jit(train_state, policy_pool, _rng)
+            train_state, metrics = train_chunk_compiled(train_state, policy_pool, _rng)
             all_metrics.append(metrics)
 
             # Optional: logging outside JIT
             if config.get("DEBUG") and chunk_idx % config.get("LOG_INTERVAL", 10) == 0:
                 print(f"Chunk {chunk_idx + 1}/{num_chunks} completed")
+
+        # Close TensorBoard writer
+        if tensorboard_writer is not None:
+            tensorboard_writer.close()
+            print(f"TensorBoard logging complete. View with: tensorboard --logdir={logdir}")
 
         return {"train_state": train_state, "metrics": all_metrics}
 
@@ -559,6 +636,7 @@ if __name__ == "__main__":
         "OPPONENT_LAG_UPDATES": 1,  # Number of chunks between opponent policy updates
         "OPPONENT_HISTORY_SIZE": 15,  # Max number of past policies to keep
         "LOG_INTERVAL": 1,  # Log every N chunks
+        "TENSORBOARD_DIR": "/tmp/ppo_poker",  # TensorBoard log directory
     }
     rng = jax.random.PRNGKey(30)
     train_fn = make_train(config)
