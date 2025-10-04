@@ -178,6 +178,8 @@ class Transition(NamedTuple):
     log_prob: jnp.ndarray
     obs: jnp.ndarray
     info: jnp.ndarray
+    episode_return: jnp.ndarray  # Accumulated return when episode ends
+    episode_length: jnp.ndarray  # Length when episode ends
 
 
 def make_train(config):
@@ -252,7 +254,7 @@ END GAMEDEF"""
         def _update_step(runner_state, update_idx):
             # COLLECT TRAJECTORIES
             def _env_step(runner_state, unused):
-                train_state, env_state, last_obs, rng = runner_state
+                train_state, env_state, last_obs, rng, episode_returns, episode_lengths = runner_state
 
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
@@ -273,6 +275,17 @@ END GAMEDEF"""
                 done = env_state.terminated
                 info = {}  # PGX doesn't use info dict
 
+                # Update episode trackers
+                episode_returns += reward
+                episode_lengths += 1
+
+                # Capture stats when episode ends, then reset trackers
+                episode_return_info = jnp.where(done, episode_returns, 0.0)
+                episode_length_info = jnp.where(done, episode_lengths, 0)
+
+                episode_returns = jnp.where(done, 0.0, episode_returns)
+                episode_lengths = jnp.where(done, 0, episode_lengths)
+
                 # Auto-reset terminated environments - use init_with_opponent_params for SPWState
                 env_state = jax.vmap(lambda s, rng: jax.lax.cond(
                     s.terminated,
@@ -283,9 +296,10 @@ END GAMEDEF"""
                 obsv = env_state.observation
 
                 transition = Transition(
-                    done, action, value, reward, log_prob, last_obs, info
+                    done, action, value, reward, log_prob, last_obs, info,
+                    episode_return_info, episode_length_info
                 )
-                runner_state = (train_state, env_state, obsv, rng)
+                runner_state = (train_state, env_state, obsv, rng, episode_returns, episode_lengths)
                 return runner_state, transition
 
             runner_state, traj_batch = jax.lax.scan(
@@ -293,7 +307,7 @@ END GAMEDEF"""
             )
 
             # CALCULATE ADVANTAGE
-            train_state, env_state, last_obs, rng = runner_state
+            train_state, env_state, last_obs, rng, episode_returns, episode_lengths = runner_state
             _, last_val = network.apply(train_state.params, last_obs)
 
             def _calculate_gae(traj_batch, last_val):
@@ -411,23 +425,25 @@ END GAMEDEF"""
             # Debugging mode - adapted for PGX
             if config.get("DEBUG"):
                 def callback(traj_batch, update_idx, loss_info):
-                    # Calculate trajectory statistics
-                    # Sum rewards across the trajectory for each environment
-                    episode_returns = traj_batch.reward.sum(axis=0)  # Sum over time steps
-                    episode_lengths = traj_batch.done.sum(axis=0)  # Count terminations
+                    # Extract only non-zero episode returns (actual completions)
+                    completed_returns = traj_batch.episode_return[traj_batch.episode_return != 0]
+                    completed_lengths = traj_batch.episode_length[traj_batch.episode_length != 0]
 
-                    # Get min/max/mean rewards
-                    mean_return = episode_returns.mean()
-                    max_return = episode_returns.max()
-                    min_return = episode_returns.min()
-                    total_episodes = episode_lengths.sum()
+                    if len(completed_returns) > 0:
+                        mean_return = completed_returns.mean()
+                        max_return = completed_returns.max()
+                        min_return = completed_returns.min()
+                        mean_length = completed_lengths.mean()
+                        num_episodes = len(completed_returns)
+                    else:
+                        mean_return = max_return = min_return = mean_length = 0.0
+                        num_episodes = 0
 
                     # Count positive/negative/zero rewards across ALL timesteps and envs
                     all_rewards = traj_batch.reward.flatten()
                     num_positive = (all_rewards > 0).sum()
                     num_negative = (all_rewards < 0).sum()
                     num_zero = (all_rewards == 0).sum()
-                    num_nonzero = (all_rewards != 0).sum()
 
                     # Extract loss info (last epoch's last minibatch)
                     total_loss, (value_loss, policy_loss, entropy) = loss_info
@@ -437,7 +453,7 @@ END GAMEDEF"""
 
                     print(f"Update {int(update_idx):4d} | Step {int(global_step):7d} | "
                           f"Return: {mean_return:7.2f} (min={min_return:7.2f}, max={max_return:7.2f}) | "
-                          f"Episodes: {int(total_episodes):3d} | "
+                          f"Episodes: {int(num_episodes):3d} | Len: {mean_length:5.1f} | "
                           f"Rewards: +{int(num_positive)} -{int(num_negative)} 0:{int(num_zero)} | "
                           f"VLoss: {value_loss[-1].mean():.4f} | "
                           f"PLoss: {policy_loss[-1].mean():.4f} | "
@@ -445,12 +461,15 @@ END GAMEDEF"""
 
                 jax.debug.callback(callback, traj_batch, update_idx, loss_info)
 
-            runner_state = (train_state, env_state, last_obs, rng)
+            runner_state = (train_state, env_state, last_obs, rng, episode_returns, episode_lengths)
             return runner_state, metric
 
         # Run the update step for one chunk
         rng, _rng = jax.random.split(rng)
-        runner_state = (agent_train_state, env_state, obsv, _rng)
+        # Initialize episode trackers
+        episode_returns = jnp.zeros(config["NUM_ENVS"])
+        episode_lengths = jnp.zeros(config["NUM_ENVS"], dtype=jnp.int32)
+        runner_state = (agent_train_state, env_state, obsv, _rng, episode_returns, episode_lengths)
         runner_state, metric = jax.lax.scan(
             _update_step, runner_state, jnp.arange(config["CHUNK_SIZE"])
         )
@@ -522,15 +541,15 @@ END GAMEDEF"""
 if __name__ == "__main__":
     config = {
         "LR": 2.5e-3,
-        "NUM_ENVS": 64,
+        "NUM_ENVS": 128,
         "NUM_STEPS": 256,
         "TOTAL_TIMESTEPS": 1e7,
         "UPDATE_EPOCHS": 1,
-        "NUM_MINIBATCHES": 64,
-        "GAMMA": 0.99,
+        "NUM_MINIBATCHES": 128,
+        "GAMMA": 1.0,
         "GAE_LAMBDA": 0.95,
         "CLIP_EPS": 0.2,
-        "ENT_COEF": 0.05,
+        "ENT_COEF": 0.02,
         "VF_COEF": 0.5,
         "MAX_GRAD_NORM": 0.5,
         "ACTIVATION": "tanh",
