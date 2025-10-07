@@ -679,6 +679,114 @@ END GAMEDEF"""
 
         print(f"✓ Terminated game step behavior test completed successfully")
 
+    # New tests from improvement plan
+    def test_full_nolimit_game_flow(self):
+        """Test a complete no-limit game flow with various actions."""
+        config_str = """GAMEDEF
+nolimit
+numplayers = 2
+stack = 100 100
+blind = 1 2
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        # Verify no-limit setup
+        assert env.game_type == "nolimit", "Should be no-limit game"
+        assert state.legal_action_mask.shape == (13,), "Should have 13 actions"
+
+        # Play through with various no-limit actions
+        steps = 0
+        actions_used = set()
+
+        while not state.terminated and steps < 50:
+            legal_actions = jnp.where(state.legal_action_mask)[0]
+
+            if len(legal_actions) > 0:
+                # Try to use different no-limit actions (3-12) when possible
+                key, subkey = jax.random.split(key)
+
+                # Prefer no-limit actions to test them
+                nolimit_actions = [a for a in legal_actions if a >= 3]
+                if nolimit_actions and steps % 3 == 0:  # Use no-limit actions sometimes
+                    action = int(jax.random.choice(subkey, jnp.array(nolimit_actions)))
+                else:
+                    action = int(jax.random.choice(subkey, legal_actions))
+
+                actions_used.add(int(action))
+                state = env.step(state, action)
+            else:
+                break
+
+            steps += 1
+
+        # Game should terminate
+        assert state.terminated, "Game should terminate"
+
+        # Should have used some no-limit specific actions (3-12)
+        nolimit_actions_used = [a for a in actions_used if a >= 3]
+        assert len(nolimit_actions_used) > 0, f"Should have used some no-limit actions, only used {actions_used}"
+
+    def test_observation_across_rounds(self):
+        """Test that observations update correctly as rounds progress."""
+        env = universal_poker.UniversalPoker()
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        # Observation format: [hole_cardset[2], board_cardset[2], pot, stack, bets[num_players], folded[num_players], round]
+        # For 2 players: 2 + 2 + 1 + 1 + 2 + 2 + 1 = 11 elements
+
+        # Preflop observation - no board cards visible
+        preflop_obs = env.observe(state)
+        board_cardset_preflop = preflop_obs[2:4]  # board_cardset[2]
+
+        from pgx.poker_eval.cardset import cardset_to_cards
+
+        board_cards_preflop = cardset_to_cards(board_cardset_preflop)[:5]
+        # In preflop, visible board should be empty (all zeros or equivalent)
+        # The board_cardset for preflop should represent an empty set
+        assert preflop_obs[-1] == 0, f"Round should be 0 (preflop), got {preflop_obs[-1]}"
+
+        # Advance to flop
+        state = env.step(state, universal_poker.CALL)
+        state = env.step(state, universal_poker.CALL)
+        assert state.round == 1, "Should be on flop"
+
+        # Flop observation - 3 board cards visible
+        flop_obs = env.observe(state)
+        board_cardset_flop = flop_obs[2:4]
+        board_cards_flop = cardset_to_cards(board_cardset_flop)[:5]
+
+        # Should have 3 cards visible (first 3 positions should be non-negative valid cards)
+        assert flop_obs[-1] == 1, f"Round should be 1 (flop), got {flop_obs[-1]}"
+        # The board_cardset should now have data (non-zero)
+        assert not jnp.array_equal(board_cardset_flop, board_cardset_preflop), "Board should have changed from preflop to flop"
+
+        # Advance to turn
+        state = env.step(state, universal_poker.CALL)
+        state = env.step(state, universal_poker.CALL)
+        assert state.round == 2, "Should be on turn"
+
+        # Turn observation - 4 board cards visible
+        turn_obs = env.observe(state)
+        board_cardset_turn = turn_obs[2:4]
+        assert turn_obs[-1] == 2, f"Round should be 2 (turn), got {turn_obs[-1]}"
+
+        # Advance to river
+        state = env.step(state, universal_poker.CALL)
+        state = env.step(state, universal_poker.CALL)
+        assert state.round == 3, "Should be on river"
+
+        # River observation - 5 board cards visible
+        river_obs = env.observe(state)
+        board_cardset_river = river_obs[2:4]
+        assert river_obs[-1] == 3, f"Round should be 3 (river), got {river_obs[-1]}"
+
+        # Verify pot and other state is reflected in observations
+        assert river_obs[4] == state.pot, f"Observation pot should match state pot"
+        assert river_obs[5] == state.stacks[state.current_player], f"Observation stack should match current player stack"
+
 
 if __name__ == "__main__":
     import sys

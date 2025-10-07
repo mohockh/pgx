@@ -261,6 +261,48 @@ class TestUniversalPokerPlayers:
             for first_player in env_test.first_player_array:
                 assert 0 <= first_player < num_players, f"Invalid first_player {first_player} for {num_players} players"
 
+    def test_navigation_with_mixed_inactive_players(self):
+        """Test player navigation with a mix of folded and all-in players (from improvement plan)."""
+        env = universal_poker.UniversalPoker(num_players=5)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        # Setup: [active, folded, all-in, active, all-in]
+        folded = jnp.array([False, True, False, False, False])
+        all_in = jnp.array([False, False, True, False, True])
+        active_mask = (~folded) & (~all_in)
+        state = state.replace(folded=folded, all_in=all_in, active_mask=active_mask)
+
+        # Verify active mask is correct: players 0 and 3 should be active
+        assert state.active_mask[0] == True, "Player 0 should be active"
+        assert state.active_mask[1] == False, "Player 1 should not be active (folded)"
+        assert state.active_mask[2] == False, "Player 2 should not be active (all-in)"
+        assert state.active_mask[3] == True, "Player 3 should be active"
+        assert state.active_mask[4] == False, "Player 4 should not be active (all-in)"
+
+        # Test navigation from player 0 -> should skip to player 3
+        state = state.replace(current_player=0)
+        next_player = env._get_next_active_player_from(state, state.current_player + 1)
+        assert next_player == 3, f"From player 0, should skip folded/all-in and go to 3, got {next_player}"
+
+        # Test navigation from player 3 -> should wrap to player 0
+        state = state.replace(current_player=3)
+        next_player = env._get_next_active_player_from(state, state.current_player + 1)
+        assert next_player == 0, f"From player 3, should wrap and skip to 0, got {next_player}"
+
+        # Test navigation from different starting positions
+        # From position 1 (folded), should find next active (3)
+        next_player = env._get_next_active_player_from(state, 1)
+        assert next_player == 3, f"From position 1, should find player 3, got {next_player}"
+
+        # From position 2 (all-in), should find next active (3)
+        next_player = env._get_next_active_player_from(state, 2)
+        assert next_player == 3, f"From position 2, should find player 3, got {next_player}"
+
+        # From position 4 (all-in), should wrap and find player 0
+        next_player = env._get_next_active_player_from(state, 5)
+        assert next_player == 0, f"From position 4, should wrap to player 0, got {next_player}"
+
     def test_complex_active_mask_scenarios(self):
         """Test complex scenarios with various combinations of folded/all-in players."""
         env = universal_poker.UniversalPoker(num_players=6)

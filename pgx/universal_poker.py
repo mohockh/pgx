@@ -154,7 +154,7 @@ class NoLimitBettingStructure:
     def initialize_game_params(self, env):
         """Initialize no-limit-specific game parameters."""
         # Initialize raise_multipliers array (4 rounds, 10 actions each)
-        # Default preflop multipliers (round 0): bet size multipliers of current bet to call
+        # Default preflop multipliers (round 0): raise amount as multiplier of bet-to-call
         preflop_defaults = [2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0, 12.0, -1.0]
         # Default postflop multipliers (rounds 1-3): fraction of pot
         postflop_defaults = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, -1.0]
@@ -627,6 +627,9 @@ class UniversalPoker(core.Env):
         # Calculate bet amount using the no-limit calculation
         chips_to_add = self._calculate_nolimit_bet_amount(state, action)
 
+        # Cap at available stack (for when action would exceed stack)
+        chips_to_add = jnp.minimum(chips_to_add, state.stacks[current_player])
+
         # Apply the bet (similar to raise logic)
         new_bets = state.bets.at[current_player].add(chips_to_add)
         new_stacks = state.stacks.at[current_player].subtract(chips_to_add)
@@ -750,10 +753,9 @@ class UniversalPoker(core.Env):
         # Calculate all possible bet amounts
         all_in_amount = state.stacks[state.current_player]
 
-        # Preflop: multiply current bet to call
+        # Preflop: multiplier represents raise amount (chips to add beyond calling)
         current_bet_to_call = state.max_bet - state.bets[state.current_player]
-        preflop_total_bet = (current_bet_to_call * multiplier).astype(jnp.uint32)
-        preflop_chips_to_add = preflop_total_bet - state.bets[state.current_player]
+        preflop_chips_to_add = (current_bet_to_call * multiplier).astype(jnp.uint32)
 
         # Postflop: fraction of pot
         postflop_chips_to_add = (state.pot * multiplier).astype(jnp.uint32)
@@ -766,8 +768,7 @@ class UniversalPoker(core.Env):
             is_all_in, all_in_amount, jnp.where(is_preflop, preflop_chips_to_add, postflop_chips_to_add)
         )
 
-        # Cap at available stack
-        return jnp.minimum(bet_amount, state.stacks[state.current_player]).astype(jnp.uint32)
+        return bet_amount.astype(jnp.uint32)
 
     def _get_legal_actions(self, state: State) -> Array:
         """Get legal actions for current player."""

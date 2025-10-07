@@ -640,6 +640,151 @@ END GAMEDEF"""
             hand_final_scores[2] > hand_final_scores[3]
         ), "P2 should have better hand than P3 (Aces and 8s > Aces and 5s)"
 
+    # New tests from improvement plan
+    def test_previous_round_bets_in_rewards(self):
+        """Test rewards calculation explicitly includes previous_round_bets in total contributions.
+
+        This is the key test that validates the reward calculation uses ALL contributions,
+        not just current round bets.
+        """
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 200 200 200
+blind = 2 4 0
+END GAMEDEF"""
+
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
+        key = jax.random.PRNGKey(999)
+        state = env.init(key)
+
+        # Create scenario where contributions are equal ONLY when including previous_round_bets
+        # All players should split pot equally because total contributions are equal
+        # P0: previous=10, current=15 -> total=25
+        # P1: previous=15, current=10 -> total=25
+        # P2: previous=12, current=13 -> total=25
+
+        state = state.replace(
+            round=4,  # Showdown
+            terminated=True,
+            stacks=jnp.array([175, 175, 175], dtype=jnp.uint32),  # 200 - 25 = 175 each
+            bets=jnp.array([15, 10, 13], dtype=jnp.uint32),  # UNEQUAL current round bets
+            previous_round_bets=jnp.array([10, 15, 12], dtype=jnp.uint32),  # Previous rounds
+            # Total contributions: [10+15, 15+10, 12+13] = [25, 25, 25] - EQUAL!
+            pot=jnp.uint32(75),  # 10+15+12+15+10+13 = 75
+            folded=jnp.array([False, False, False], dtype=jnp.bool_),
+            hand_final_scores=jnp.array([7000, 7000, 7000], dtype=jnp.uint32),  # All tied
+            active_mask=jnp.array([True, True, True], dtype=jnp.bool_),
+            rewards=jnp.zeros(3, dtype=jnp.float32),
+        )
+
+        rewards = env._calculate_rewards(state)
+
+        # With proper total contribution calculation (previous_round_bets + bets),
+        # all players have equal contributions [25, 25, 25] and tied hands
+        # So pot should split equally: each gets 25
+        # Net stack change: [25-25, 25-25, 25-25] = [0, 0, 0] (all break even)
+        assert rewards[0] == 0.0, f"P0 should break even with equal total contributions, got {rewards[0]}"
+        assert rewards[1] == 0.0, f"P1 should break even with equal total contributions, got {rewards[1]}"
+        assert rewards[2] == 0.0, f"P2 should break even with equal total contributions, got {rewards[2]}"
+
+        # If previous_round_bets were IGNORED (bug), contributions would be [15, 10, 13] (unequal)
+        # and the pot would be split differently, causing test to fail
+
+    def test_single_pot_vs_side_pot_path(self):
+        """Test both single_pot_calculation fast-path and full side_pot_calculation.
+
+        Validates that the optimization for equal contributions (single pot) works correctly,
+        and that unequal contributions properly trigger the full side pot algorithm.
+        """
+        # Test 1: Single pot calculation (all active players contributed exactly the same)
+        env1, state1 = self._create_test_state(
+            num_players=4,
+            stacks=[0, 0, 0, 0],
+            bets=[30, 30, 30, 30],  # ALL EQUAL - triggers single_pot_calculation
+            folded=[False, False, False, False],
+            hand_strengths=[6000, 5000, 4000, 3000],  # P0 > P1 > P2 > P3
+        )
+
+        rewards1 = env1._calculate_rewards(state1)
+
+        # Single pot: P0 wins all 120 chips
+        # Net stack change: P0=90 (120-30), others=-30 each
+        assert rewards1[0] == 90.0, f"P0 should win single pot, got {rewards1[0]}"
+        assert rewards1[1] == -30.0, f"P1 should lose contribution, got {rewards1[1]}"
+        assert rewards1[2] == -30.0, f"P2 should lose contribution, got {rewards1[2]}"
+        assert rewards1[3] == -30.0, f"P3 should lose contribution, got {rewards1[3]}"
+
+        # Test 2: Side pot calculation (unequal contributions - triggers full algorithm)
+        env2, state2 = self._create_test_state(
+            num_players=4,
+            stacks=[0, 0, 0, 0],
+            bets=[10, 20, 30, 40],  # UNEQUAL - triggers side_pot_calculation
+            folded=[False, False, False, False],
+            hand_strengths=[6000, 5000, 4000, 3000],  # P0 > P1 > P2 > P3
+        )
+
+        rewards2 = env2._calculate_rewards(state2)
+
+        # Complex side pot distribution:
+        # Layer 1 (0->10): P0 wins 10*4=40
+        # Layer 2 (10->20): P1 wins 10*3=30
+        # Layer 3 (20->30): P2 wins 10*2=20
+        # Layer 4 (30->40): P3 wins 10*1=10
+        # Pot shares: P0=40, P1=30, P2=20, P3=10
+        # Contributions: P0=10, P1=20, P2=30, P3=40
+        # Net: P0=30, P1=10, P2=-10, P3=-30
+        assert rewards2[0] == 30.0, f"P0 should get net +30 from side pots, got {rewards2[0]}"
+        assert rewards2[1] == 10.0, f"P1 should get net +10 from side pots, got {rewards2[1]}"
+        assert rewards2[2] == -10.0, f"P2 should get net -10 from side pots, got {rewards2[2]}"
+        assert rewards2[3] == -30.0, f"P3 should get net -30 from side pots, got {rewards2[3]}"
+
+    def test_remainder_distribution_in_side_pots(self):
+        """Test remainder chip distribution in multiple pot layers independently.
+
+        Validates that when a pot layer can't be split evenly, remainder chips go to
+        winners in positional order, and this is handled independently for each layer.
+        """
+        # Setup: 5 players with 3-way tie in main pot (remainder 2) and 2-way tie in side pot (remainder 1)
+        env, state = self._create_test_state(
+            num_players=5,
+            stacks=[0, 0, 0, 0, 0],
+            bets=[20, 20, 20, 30, 40],  # Creates multiple layers
+            folded=[False, False, False, False, False],
+            # P0,P1,P2 tied for best (will split main pot)
+            # P3,P4 tied for second best (will compete for side pot)
+            hand_strengths=[8000, 8000, 8000, 5000, 5000],
+        )
+
+        rewards = env._calculate_rewards(state)
+
+        # Side pot calculation:
+        # Layer 1 (0->20): 20*5=100 chips, P0,P1,P2 tie (3-way)
+        #   100 // 3 = 33 each, remainder = 1
+        #   P0 gets 34 (33+1), P1 gets 33, P2 gets 33
+        # Layer 2 (20->30): 10*2=20 chips, P3,P4 tie (2-way)
+        #   20 // 2 = 10 each, remainder = 0
+        #   P3 gets 10, P4 gets 10
+        # Layer 3 (30->40): 10*1=10 chips, only P4 eligible
+        #   P4 gets 10
+
+        # Pot shares: P0=34, P1=33, P2=33, P3=10, P4=20
+        # Contributions: P0=20, P1=20, P2=20, P3=30, P4=40
+        # Net stack change: P0=14, P1=13, P2=13, P3=-20, P4=-20
+
+        assert rewards[0] == 14.0, f"P0 should get net +14 (gets remainder chip in layer 1), got {rewards[0]}"
+        assert rewards[1] == 13.0, f"P1 should get net +13, got {rewards[1]}"
+        assert rewards[2] == 13.0, f"P2 should get net +13, got {rewards[2]}"
+        assert rewards[3] == -20.0, f"P3 should get net -20, got {rewards[3]}"
+        assert rewards[4] == -20.0, f"P4 should get net -20, got {rewards[4]}"
+
+        # Verify total is zero (chip conservation)
+        reward_sum = sum(rewards)
+        assert abs(reward_sum) < 0.01, f"Total net stack changes should sum to zero, got {reward_sum}"
+
+        # Verify remainder was distributed positionally (P0 gets it, not P1 or P2)
+        assert rewards[0] > rewards[1], "P0 should get more than P1 due to positional remainder"
+        assert rewards[1] == rewards[2], "P1 and P2 should get equal amounts"
+
     # Multi-round betting tests that should FAIL before the fix and PASS after
     def test_multi_round_bet_accumulation_failing(self):
         """Test that demonstrates the bug: previous round bets are lost in reward calculation.

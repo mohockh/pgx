@@ -21,39 +21,100 @@ class TestUniversalPokerBetting:
         assert state.round == 1
         assert state.max_bet == 0  # Bets reset for new round
 
-    def test_call_action(self):
-        """Test calling action."""
+    # New tests from improvement plan
+    def test_is_betting_round_over_logic(self):
+        """Test the _is_betting_round_over function logic."""
         env = universal_poker.UniversalPoker()
         key = jax.random.PRNGKey(42)
         state = env.init(key)
 
-        current_player = state.current_player
-        initial_stack = state.stacks[current_player]
-        initial_bet = state.bets[current_player]
-        call_amount = state.max_bet - initial_bet
+        # Test 1: Round should not be over at start (big blind option)
+        # In preflop, big blind has the option to raise even if all call to them
+        assert not env._is_betting_round_over(state), "Round should not be over at start"
 
-        # Player calls
-        new_state = env.step(state, universal_poker.CALL)
+        # Test 2: After small blind calls, round still not over (big blind hasn't acted)
+        state = env.step(state, universal_poker.CALL)
+        assert not env._is_betting_round_over(state), "Round should not be over after one call"
 
-        assert new_state.bets[current_player] == state.max_bet
-        assert new_state.stacks[current_player] == initial_stack - call_amount
-        assert new_state.pot == state.pot + call_amount
+        # Test 3: After big blind checks, round should be over
+        state = env.step(state, universal_poker.CALL)
+        # Round should advance here, so we need to check before the step
 
-    def test_raise_action(self):
-        """Test raising action."""
-        env = universal_poker.UniversalPoker()
+        # Test 4: Test on flop - both players act
+        assert state.round == 1, "Should be on flop"
+        initial_round = state.round
+        state = env.step(state, universal_poker.CALL)  # First player checks
+        assert state.round == initial_round, "Should still be on same round"
+        state = env.step(state, universal_poker.CALL)  # Second player checks
+        assert state.round == initial_round + 1, "Should advance to next round after both check"
+
+    def test_is_betting_round_over_big_blind_option(self):
+        """Test the big blind option: BB should have option to raise when all call to them."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 100 100 100
+blind = 1 2 0
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
 
+        # Player 2 (UTG) calls
+        state = env.step(state, universal_poker.CALL)
+
+        # Player 0 (SB) calls
+        state = env.step(state, universal_poker.CALL)
+
+        # Now BB should have option to raise or check
+        # Round should not be over yet - BB hasn't had their option
         current_player = state.current_player
-        initial_stack = state.stacks[current_player]
+        assert current_player == 1, "Should be BB's turn"
+        assert state.round == 0, "Should still be preflop"
 
-        # Player raises
-        new_state = env.step(state, universal_poker.RAISE)
+        # BB checks - now round should be over
+        state = env.step(state, universal_poker.CALL)
+        assert state.round == 1, "Should advance to flop after BB checks"
 
-        assert new_state.max_bet > state.max_bet
-        assert new_state.stacks[current_player] < initial_stack
-        assert new_state.last_raiser == current_player
+    def test_previous_round_bets_accumulation(self):
+        """Test that previous_round_bets correctly accumulates across rounds."""
+        config_str = """GAMEDEF
+numplayers = 2
+stack = 100 100
+blind = 1 2
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        # Preflop: SB has 1, BB has 2
+        assert state.bets[0] == 1, "SB should have bet 1"
+        assert state.bets[1] == 2, "BB should have bet 2"
+        assert jnp.all(state.previous_round_bets == 0), "previous_round_bets should be 0 initially"
+
+        # SB raises to 4
+        state = env.step(state, universal_poker.RAISE)
+
+        # BB calls (this will advance the round since betting is complete)
+        state = env.step(state, universal_poker.CALL)
+
+        # After preflop completes, check previous_round_bets and current bets
+        assert state.round == 1, "Should be on flop"
+        assert state.previous_round_bets[0] == 4, f"previous_round_bets[0] should be 4, got {state.previous_round_bets[0]}"
+        assert state.previous_round_bets[1] == 4, f"previous_round_bets[1] should be 4, got {state.previous_round_bets[1]}"
+        assert jnp.all(state.bets == 0), "Current bets should be reset to 0 on flop"
+
+        # Flop: SB bets 10
+        state = env.step(state, universal_poker.RAISE)
+        flop_bet = state.bets[state.last_raiser]
+
+        # BB calls
+        state = env.step(state, universal_poker.CALL)
+
+        # After flop, check accumulation
+        assert state.round == 2, "Should be on turn"
+        assert state.previous_round_bets[0] == 4 + flop_bet, f"previous_round_bets[0] should include preflop+flop"
+        assert state.previous_round_bets[1] == 4 + flop_bet, f"previous_round_bets[1] should include preflop+flop"
+        assert jnp.all(state.bets == 0), "Current bets should be reset to 0 on turn"
 
     def test_all_in_scenario(self):
         """Test all-in scenario."""

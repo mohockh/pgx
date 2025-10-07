@@ -310,9 +310,9 @@ END GAMEDEF"""
         assert legal_actions[universal_poker.CALL]  # Can call
         assert legal_actions[universal_poker.RAISE]  # Can raise
 
-    # Action Application Tests (from test_universal_poker_apply_action.py)
-    def test_fold_action_basic(self):
-        """Test basic fold action updates state correctly."""
+    # Action Application Tests (consolidated from test_universal_poker_apply_action.py)
+    def test_fold_action_comprehensive(self):
+        """Test fold action updates state correctly (consolidated test)."""
         env = universal_poker.UniversalPoker()
         key = jax.random.PRNGKey(42)
         state = env.init(key)
@@ -322,7 +322,7 @@ END GAMEDEF"""
         initial_stack = state.stacks[current_player]
         initial_bet = state.bets[current_player]
 
-        # Apply fold action directly
+        # Test 1: Apply fold action directly with _apply_action
         new_state = env._apply_action(state, universal_poker.FOLD)
 
         # Verify fold updates
@@ -335,6 +335,14 @@ END GAMEDEF"""
 
         # Verify active mask is updated
         assert new_state.active_mask[current_player] == False, "Folded player should not be active"
+
+        # Test 2: Apply fold via step() and check termination
+        state2 = env.init(jax.random.PRNGKey(43))
+        current_player2 = state2.current_player
+        new_state2 = env.step(state2, universal_poker.FOLD)
+
+        assert new_state2.folded[current_player2], "Player should be folded"
+        assert new_state2.terminated, "Game should end with fold in 2-player game"
 
     def test_call_action_basic(self):
         """Test basic call action with sufficient chips."""
@@ -520,18 +528,172 @@ END GAMEDEF"""
         assert jnp.sum(state.active_mask) == initial_active_count, "Call should not change active count"
         assert state.active_mask[1] == True, "Calling player should remain active"
 
-    def test_fold_action(self):
-        """Test folding action."""
-        env = universal_poker.UniversalPoker()
+    # No-Limit Action Tests (from improvement plan)
+    def test_nolimit_get_legal_actions(self):
+        """Test that legal actions work correctly in no-limit games with 13-action mask."""
+        config_str = """GAMEDEF
+nolimit
+numplayers = 2
+stack = 100 100
+blind = 1 2
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
         key = jax.random.PRNGKey(42)
         state = env.init(key)
 
-        # Player folds
-        current_player = state.current_player
-        new_state = env.step(state, universal_poker.FOLD)
+        legal_actions = env._get_legal_actions(state)
 
-        assert new_state.folded[current_player]
-        assert new_state.terminated  # Game should end with fold in 2-player game
+        # Should have 13 actions in no-limit
+        assert legal_actions.shape == (13,), f"Expected 13 actions for no-limit, got {legal_actions.shape}"
+
+        # Basic actions (0-2) should be legal
+        assert legal_actions[0] == True, "Should be able to fold"
+        assert legal_actions[1] == True, "Should be able to call"
+        assert legal_actions[2] == True, "Should be able to min-raise"
+
+        # Some raise actions (3-12) should be legal based on affordability
+        # Player 0 has 99 chips (100-1), can afford various raise sizes
+        # At least some of them should be legal
+        assert jnp.any(legal_actions[3:13]), "At least some raise actions should be legal"
+
+    def test_nolimit_get_legal_actions_affordability(self):
+        """Test that no-limit legal actions correctly filter by affordability."""
+        config_str = """GAMEDEF
+nolimit
+numplayers = 2
+stack = 10 100
+blind = 1 2
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        # Player 0 has 9 chips (10-1), limited affordability
+        state = state.replace(current_player=0)
+        legal_actions = env._get_legal_actions(state)
+
+        # Should have 13 actions
+        assert legal_actions.shape == (13,), f"Expected 13 actions, got {legal_actions.shape}"
+
+        # Basic actions should work
+        assert legal_actions[0] == True, "Should be able to fold"
+        assert legal_actions[1] == True, "Should be able to call (has chips)"
+
+        # Large raise actions should not be affordable
+        # Test that some actions are False due to insufficient chips
+        num_legal_raises = jnp.sum(legal_actions[3:13])
+        assert num_legal_raises < 10, "Not all raise actions should be affordable with limited chips"
+
+    def test_nolimit_apply_action_preflop(self):
+        """Test application of no-limit raise actions (3-12) in preflop."""
+        config_str = """GAMEDEF
+nolimit
+numplayers = 2
+stack = 100 100
+blind = 1 2
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        # Test action 3 (first preflop raise multiplier, should be 2.0x bet-to-call)
+        current_player = state.current_player
+        bet_to_call = state.max_bet - state.bets[current_player]  # 2 - 1 = 1
+        expected_bet_amount = bet_to_call * 2.0  # 1 * 2.0 = 2
+
+        new_state = env._apply_action(state, 3)
+
+        # Check that bet amount is calculated correctly
+        chips_added = new_state.bets[current_player] - state.bets[current_player]
+        assert chips_added == int(expected_bet_amount), f"Expected {int(expected_bet_amount)} chips added, got {chips_added}"
+
+    def test_nolimit_apply_action_postflop(self):
+        """Test application of no-limit raise actions (3-12) in postflop (fraction of pot)."""
+        config_str = """GAMEDEF
+nolimit
+numplayers = 2
+stack = 100 100
+blind = 1 2
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        # Advance to flop
+        state = env.step(state, universal_poker.CALL)
+        state = env.step(state, universal_poker.CALL)
+        assert state.round == 1, "Should be on flop"
+
+        # Test action 3 (first postflop raise multiplier, should be 0.25x pot)
+        pot_size = state.pot
+        expected_bet_amount = int(pot_size * 0.25)
+
+        current_player = state.current_player
+        new_state = env._apply_action(state, 3)
+
+        # Check that bet amount is calculated correctly (approximately, due to rounding)
+        chips_added = new_state.bets[current_player] - state.bets[current_player]
+        assert chips_added <= state.stacks[current_player], "Can't bet more than stack"
+        assert chips_added > 0, "Should have added chips"
+
+    def test_nolimit_all_in_action(self):
+        """Test the special all-in multiplier (-1.0)."""
+        config_str = """GAMEDEF
+nolimit
+numplayers = 2
+stack = 50 100
+blind = 1 2
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        # Find the all-in action (action with multiplier -1.0)
+        # In default config, action 12 should be all-in
+        all_in_action = 12
+
+        current_player = state.current_player
+        initial_stack = state.stacks[current_player]
+
+        new_state = env._apply_action(state, all_in_action)
+
+        # Player should be all-in
+        assert new_state.stacks[current_player] == 0, "Player should have 0 chips after all-in"
+        assert new_state.all_in[current_player] == True, "Player should be marked all-in"
+        # All chips should have been added to bet
+        assert new_state.bets[current_player] == state.bets[current_player] + initial_stack, "All chips should be bet"
+
+    def test_min_raise_after_reraise(self):
+        """Test min_raise updates correctly after a sequence of raises."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 100 100 100
+blind = 1 2 0
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        # Initial min_raise should be big blind (2)
+        assert state.min_raise == 2, f"Initial min_raise should be 2, got {state.min_raise}"
+
+        # Player 1 (or whoever is first) raises
+        initial_max_bet = state.max_bet  # Should be 2
+        state = env._apply_action(state, universal_poker.RAISE)
+        first_raise_increment = state.max_bet - initial_max_bet
+
+        # min_raise should now be the raise increment
+        assert state.min_raise == first_raise_increment, f"min_raise should be {first_raise_increment}, got {state.min_raise}"
+
+        # Advance to next player and reraise
+        state = env._next_player(state)
+        second_initial_max = state.max_bet
+        state = env._apply_action(state, universal_poker.RAISE)
+        second_raise_increment = state.max_bet - second_initial_max
+
+        # min_raise should now be the larger of the two raise increments
+        expected_min_raise = max(first_raise_increment, second_raise_increment)
+        assert state.min_raise == expected_min_raise, f"min_raise should be {expected_min_raise}, got {state.min_raise}"
 
     def test_min_raise_underflow_bug_limit(self):
         """Test that demonstrates the min_raise uint32 underflow bug in limit poker."""

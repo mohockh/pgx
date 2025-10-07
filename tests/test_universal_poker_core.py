@@ -128,9 +128,10 @@ END GAMEDEF"""
                 total_chips = jnp.sum(state.stacks[: state.num_players]) + state.pot
                 assert total_chips == initial_total
 
-    # Configuration String Tests
-    def test_config_string_basic(self):
-        """Test basic config string parsing."""
+    # Configuration String Tests (consolidated)
+    def test_config_string_parsing(self):
+        """Test config string parsing with various parameters (consolidated test)."""
+        # Test 1: 3 players with mixed stacks
         config_str = """GAMEDEF
 numplayers = 3
 stack = 100 150 200
@@ -141,71 +142,52 @@ END GAMEDEF"""
         key = jax.random.PRNGKey(42)
         state = env.init(key)
 
-        # Test number of players
         assert state.num_players == 3
         assert env.num_players == 3
-
-        # Test stack sizes
         assert state.stacks[0] == 95  # 100 - 5 (blind)
         assert state.stacks[1] == 140  # 150 - 10 (blind)
         assert state.stacks[2] == 200  # 200 - 0 (no blind)
-
-        # Test blind structure
         assert state.bets[0] == 5  # Player 0 posts 5
         assert state.bets[1] == 10  # Player 1 posts 10
         assert state.bets[2] == 0  # Player 2 posts 0
-
-        # Test pot
         assert state.pot == 15  # 5 + 10 + 0
         assert state.max_bet == 10  # Max of blind amounts
 
-    def test_config_string_four_players(self):
-        """Test config string with four players."""
-        config_str = """GAMEDEF
+        # Test 2: 4 players with uniform stacks
+        config_str2 = """GAMEDEF
 numplayers = 4
 stack = 500 500 500 500
 blind = 1 2 0 0
 END GAMEDEF"""
 
-        env = universal_poker.UniversalPoker(num_players=4, config_str=config_str)
-        key = jax.random.PRNGKey(42)
-        state = env.init(key)
+        env2 = universal_poker.UniversalPoker(num_players=4, config_str=config_str2)
+        state2 = env2.init(key)
 
-        assert state.num_players == 4
+        assert state2.num_players == 4
+        assert state2.stacks[0] == 499  # 500 - 1
+        assert state2.stacks[1] == 498  # 500 - 2
+        assert state2.stacks[2] == 500  # 500 - 0
+        assert state2.stacks[3] == 500  # 500 - 0
+        assert state2.bets[0] == 1
+        assert state2.bets[1] == 2
+        assert state2.bets[2] == 0
+        assert state2.bets[3] == 0
+        assert state2.pot == 3
+        assert state2.max_bet == 2
 
-        # Check stacks after blinds
-        assert state.stacks[0] == 499  # 500 - 1
-        assert state.stacks[1] == 498  # 500 - 2
-        assert state.stacks[2] == 500  # 500 - 0
-        assert state.stacks[3] == 500  # 500 - 0
-
-        # Check blinds
-        assert state.bets[0] == 1
-        assert state.bets[1] == 2
-        assert state.bets[2] == 0
-        assert state.bets[3] == 0
-
-        assert state.pot == 3
-        assert state.max_bet == 2
-
-    def test_config_string_different_stacks(self):
-        """Test config string with different stack sizes."""
-        config_str = """GAMEDEF
+        # Test 3: Different stack sizes (small/medium/large)
+        config_str3 = """GAMEDEF
 numplayers = 3
 stack = 50 100 200
 blind = 1 2 0
 END GAMEDEF"""
 
-        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
-        key = jax.random.PRNGKey(42)
-        state = env.init(key)
+        env3 = universal_poker.UniversalPoker(num_players=3, config_str=config_str3)
+        state3 = env3.init(key)
 
-        # Player 0: small stack
-        assert state.stacks[0] == 49  # 50 - 1
-        # Player 1: medium stack
-        assert state.stacks[1] == 98  # 100 - 2
-        # Player 2: large stack
-        assert state.stacks[2] == 200  # 200 - 0
+        assert state3.stacks[0] == 49  # 50 - 1 (small stack)
+        assert state3.stacks[1] == 98  # 100 - 2 (medium stack)
+        assert state3.stacks[2] == 200  # 200 - 0 (large stack)
 
     def test_config_string_ante_structure(self):
         """Test config string with ante-like structure (all players post)."""
@@ -423,6 +405,103 @@ END GAMEDEF"""
         for p in range(4):
             hole_cards = cardset_to_cards(state.hole_cardsets[p])[:2]  # Take first 2
             assert jnp.all(hole_cards >= 0)
+
+    # New tests from improvement plan
+    def test_init_insufficient_stack_for_blind(self):
+        """Test game initialization where a player's stack is less than the big blind."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 1 10 200
+blind = 5 10 0
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        # Player 0 has insufficient chips (1 < 10 big blind)
+        # They should be auto-folded
+        assert state.folded[0], "Player with insufficient chips should be auto-folded"
+        assert not state.folded[1], "Player with sufficient chips should not be folded"
+        assert not state.folded[2], "Player with sufficient chips should not be folded"
+
+        # Game should terminate if only one player remains after auto-folding
+        # In this case, we have 2 active players, so game continues
+        assert not state.terminated, "Game should continue with 2+ active players"
+
+    def test_config_mismatched_num_players(self):
+        """Test that an AssertionError is raised if num_players in config doesn't match constructor."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 100 100 100
+blind = 1 2 0
+END GAMEDEF"""
+
+        # This should raise an AssertionError
+        try:
+            env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+            env.init(jax.random.PRNGKey(42))
+            assert False, "Should have raised AssertionError for mismatched num_players"
+        except AssertionError:
+            pass  # Expected
+
+    def test_config_invalid_string(self):
+        """Test that a ValueError is raised for malformed config strings."""
+        # Test missing GAMEDEF header
+        config_str1 = """numplayers = 2
+stack = 100 100
+END GAMEDEF"""
+
+        try:
+            env = universal_poker.UniversalPoker(num_players=2, config_str=config_str1)
+            assert False, "Should have raised ValueError for missing GAMEDEF"
+        except ValueError:
+            pass  # Expected
+
+        # Test missing END GAMEDEF footer
+        config_str2 = """GAMEDEF
+numplayers = 2
+stack = 100 100"""
+
+        try:
+            env = universal_poker.UniversalPoker(num_players=2, config_str=config_str2)
+            assert False, "Should have raised ValueError for missing END GAMEDEF"
+        except ValueError:
+            pass  # Expected
+
+        # Test non-integer values
+        config_str3 = """GAMEDEF
+numplayers = two
+stack = 100 100
+END GAMEDEF"""
+
+        try:
+            env = universal_poker.UniversalPoker(num_players=2, config_str=config_str3)
+            assert False, "Should have raised ValueError for non-integer value"
+        except ValueError:
+            pass  # Expected
+
+    def test_config_firstplayer_override(self):
+        """Test that the firstplayer config line correctly overrides the default first-to-act player."""
+        config_str = """GAMEDEF
+numplayers = 3
+stack = 100 100 100
+blind = 1 2 0
+firstplayer = 2 3 3 3
+END GAMEDEF"""
+
+        env = universal_poker.UniversalPoker(num_players=3, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        # firstplayer = 2 3 3 3 means (1-based):
+        # Round 0 (preflop): player 2 (index 1)
+        # Round 1-3 (postflop): player 3 (index 2)
+        # After posting blinds, the first to act should be based on firstplayer config
+        # In 0-based indexing: [1, 2, 2, 2]
+        assert env.first_player_array[0] == 1, f"Expected first player in round 0 to be 1, got {env.first_player_array[0]}"
+        assert env.first_player_array[1] == 2, f"Expected first player in round 1 to be 2, got {env.first_player_array[1]}"
+        assert env.first_player_array[2] == 2, f"Expected first player in round 2 to be 2, got {env.first_player_array[2]}"
+        assert env.first_player_array[3] == 2, f"Expected first player in round 3 to be 2, got {env.first_player_array[3]}"
 
     # No-Limit Configuration Tests
     def test_config_nolimit_basic(self):
