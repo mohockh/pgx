@@ -136,29 +136,44 @@ class NoLimitBettingStructure:
         legal_actions = legal_actions.at[0].set(can_fold)
         legal_actions = legal_actions.at[1].set(can_call)
 
-        # Actions 2+: vectorized check if player can afford each bet size
-        # Only check actions that have multipliers defined
-        num_raise_actions = env.raise_multipliers.shape[1]
+        # Actions 2+: Fully vectorized computation of all raise actions at once
+        # Get all multipliers for current round (shape: [num_raise_actions])
+        multipliers = env.raise_multipliers[state.round, :]
 
-        if num_raise_actions > 0:
-            actions_to_check = jnp.arange(2, 2 + num_raise_actions)
+        # Pre-compute common values
+        current_bet_to_call = state.max_bet - state.bets[current_player]
+        player_stack = state.stacks[current_player]
+        is_folded = state.folded[current_player]
 
-            def check_affordability(action_idx):
-                bet_amount = env._calculate_nolimit_bet_amount(state, action_idx)
-                # Check if multiplier is set (non-zero) for this round
-                multiplier_idx = action_idx - 2
-                multiplier = env.raise_multipliers[state.round, multiplier_idx]
-                is_valid_action = multiplier != 0.0
-                return (
-                    is_valid_action
-                    & (bet_amount > 0)
-                    & (bet_amount <= state.stacks[current_player])
-                    & ~state.folded[current_player]
-                )
+        # Calculate ALL bet amounts at once (vectorized)
+        # Preflop: multiplier * bet_to_call
+        preflop_amounts = (current_bet_to_call * multipliers).astype(jnp.uint32)
+        # Postflop: multiplier * pot
+        postflop_amounts = (state.pot * multipliers).astype(jnp.uint32)
+        # All-in amount (broadcast to match shape)
+        all_in_amount = player_stack
 
-            # Vectorized map over raise actions
-            affordability = jax.vmap(check_affordability)(actions_to_check)
-            legal_actions = legal_actions.at[2 : 2 + num_raise_actions].set(affordability)
+        # Select based on round and multiplier type (vectorized)
+        is_preflop = state.round == 0
+        is_all_in_action = multipliers == -1.0
+
+        # Vectorized selection for all actions
+        bet_amounts = jnp.where(
+            is_all_in_action,
+            all_in_amount,
+            jnp.where(is_preflop, preflop_amounts, postflop_amounts)
+        )
+
+        # Check all conditions at once (vectorized)
+        is_valid_multiplier = multipliers != 0.0
+        can_afford = (bet_amounts > 0) & (bet_amounts <= player_stack)
+
+        # Combine all conditions
+        legal_raise_actions = is_valid_multiplier & can_afford & ~is_folded
+
+        # Set all raise actions at once
+        num_raise_actions = multipliers.shape[0]
+        legal_actions = legal_actions.at[2:2 + num_raise_actions].set(legal_raise_actions)
 
         return legal_actions
 
