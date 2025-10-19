@@ -530,7 +530,7 @@ END GAMEDEF"""
 
     # No-Limit Action Tests (from improvement plan)
     def test_nolimit_get_legal_actions(self):
-        """Test that legal actions work correctly in no-limit games with 13-action mask."""
+        """Test that legal actions work correctly in no-limit games with dynamic action mask."""
         config_str = """GAMEDEF
 nolimit
 numplayers = 2
@@ -543,18 +543,20 @@ END GAMEDEF"""
 
         legal_actions = env._get_legal_actions(state)
 
-        # Should have 13 actions in no-limit
-        assert legal_actions.shape == (13,), f"Expected 13 actions for no-limit, got {legal_actions.shape}"
+        # Should have default 12 actions in no-limit (2 basic + 10 raise)
+        assert legal_actions.shape == (
+            12,
+        ), f"Expected 12 actions for no-limit with defaults, got {legal_actions.shape}"
+        assert env.action_space_size == 12, f"Expected action_space_size=12, got {env.action_space_size}"
 
-        # Basic actions (0-2) should be legal
+        # Basic actions (0-1) should be legal
         assert legal_actions[0] == True, "Should be able to fold"
         assert legal_actions[1] == True, "Should be able to call"
-        assert legal_actions[2] == True, "Should be able to min-raise"
 
-        # Some raise actions (3-12) should be legal based on affordability
+        # Raise actions (2-11) - at least some should be legal based on affordability
         # Player 0 has 99 chips (100-1), can afford various raise sizes
         # At least some of them should be legal
-        assert jnp.any(legal_actions[3:13]), "At least some raise actions should be legal"
+        assert jnp.any(legal_actions[2:12]), "At least some raise actions should be legal"
 
     def test_nolimit_get_legal_actions_affordability(self):
         """Test that no-limit legal actions correctly filter by affordability."""
@@ -572,8 +574,9 @@ END GAMEDEF"""
         state = state.replace(current_player=0)
         legal_actions = env._get_legal_actions(state)
 
-        # Should have 13 actions
-        assert legal_actions.shape == (13,), f"Expected 13 actions, got {legal_actions.shape}"
+        # Should have default 12 actions (2 basic + 10 raise)
+        assert legal_actions.shape == (12,), f"Expected 12 actions, got {legal_actions.shape}"
+        assert env.action_space_size == 12, f"Expected action_space_size=12, got {env.action_space_size}"
 
         # Basic actions should work
         assert legal_actions[0] == True, "Should be able to fold"
@@ -581,11 +584,11 @@ END GAMEDEF"""
 
         # Large raise actions should not be affordable
         # Test that some actions are False due to insufficient chips
-        num_legal_raises = jnp.sum(legal_actions[3:13])
+        num_legal_raises = jnp.sum(legal_actions[2:12])
         assert num_legal_raises < 10, "Not all raise actions should be affordable with limited chips"
 
     def test_nolimit_apply_action_preflop(self):
-        """Test application of no-limit raise actions (3-12) in preflop."""
+        """Test application of no-limit raise actions (2-11) in preflop."""
         config_str = """GAMEDEF
 nolimit
 numplayers = 2
@@ -596,19 +599,21 @@ END GAMEDEF"""
         key = jax.random.PRNGKey(42)
         state = env.init(key)
 
-        # Test action 3 (first preflop raise multiplier, should be 2.0x bet-to-call)
+        # Test action 2 (first preflop raise multiplier, should be 2.0x bet-to-call)
         current_player = state.current_player
         bet_to_call = state.max_bet - state.bets[current_player]  # 2 - 1 = 1
         expected_bet_amount = bet_to_call * 2.0  # 1 * 2.0 = 2
 
-        new_state = env._apply_action(state, 3)
+        new_state = env._apply_action(state, 2)
 
         # Check that bet amount is calculated correctly
         chips_added = new_state.bets[current_player] - state.bets[current_player]
-        assert chips_added == int(expected_bet_amount), f"Expected {int(expected_bet_amount)} chips added, got {chips_added}"
+        assert chips_added == int(
+            expected_bet_amount
+        ), f"Expected {int(expected_bet_amount)} chips added, got {chips_added}"
 
     def test_nolimit_apply_action_postflop(self):
-        """Test application of no-limit raise actions (3-12) in postflop (fraction of pot)."""
+        """Test application of no-limit raise actions (2-11) in postflop (fraction of pot)."""
         config_str = """GAMEDEF
 nolimit
 numplayers = 2
@@ -624,12 +629,12 @@ END GAMEDEF"""
         state = env.step(state, universal_poker.CALL)
         assert state.round == 1, "Should be on flop"
 
-        # Test action 3 (first postflop raise multiplier, should be 0.25x pot)
+        # Test action 2 (first postflop raise multiplier, should be 0.25x pot)
         pot_size = state.pot
         expected_bet_amount = int(pot_size * 0.25)
 
         current_player = state.current_player
-        new_state = env._apply_action(state, 3)
+        new_state = env._apply_action(state, 2)
 
         # Check that bet amount is calculated correctly (approximately, due to rounding)
         chips_added = new_state.bets[current_player] - state.bets[current_player]
@@ -649,8 +654,8 @@ END GAMEDEF"""
         state = env.init(key)
 
         # Find the all-in action (action with multiplier -1.0)
-        # In default config, action 12 should be all-in
-        all_in_action = 12
+        # In default config, action 11 should be all-in (was 12, now 11 with 2 basic actions)
+        all_in_action = 11
 
         current_player = state.current_player
         initial_stack = state.stacks[current_player]
@@ -683,7 +688,9 @@ END GAMEDEF"""
         first_raise_increment = state.max_bet - initial_max_bet
 
         # min_raise should now be the raise increment
-        assert state.min_raise == first_raise_increment, f"min_raise should be {first_raise_increment}, got {state.min_raise}"
+        assert (
+            state.min_raise == first_raise_increment
+        ), f"min_raise should be {first_raise_increment}, got {state.min_raise}"
 
         # Advance to next player and reraise
         state = env._next_player(state)
@@ -788,13 +795,147 @@ END GAMEDEF"""
             call_state.min_raise < 1000000
         ), f"No-limit call should not cause min_raise underflow, got {call_state.min_raise}"
 
-        # Test no-limit raise actions (3-12)
-        for action in range(3, 13):
+        # Test no-limit raise actions (3+) - use dynamic action space size
+        for action in range(3, env.action_space_size):
             if state.legal_action_mask[action]:  # Only test legal actions
                 nolimit_state = env._apply_action(state, action)
                 assert (
                     nolimit_state.min_raise < 1000000
                 ), f"No-limit action {action} should not cause min_raise underflow, got {nolimit_state.min_raise}"
+
+    # Dynamic Action Space Tests
+    def test_dynamic_action_space_with_config(self):
+        """Test that action space size is dynamic based on raise_multipliers in config."""
+        config_str = """GAMEDEF
+nolimit
+numplayers = 2
+stack = 100 100
+blind = 1 2
+raise_multipliers 0 2.0 2.5 3.0 4.0 5.0
+raise_multipliers 1 0.5 0.75 1.0
+raise_multipliers 2 0.25 0.33 0.5 0.67 0.75 1.0 1.5
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+
+        # Max multipliers across rounds: max(5, 3, 7) = 7
+        # Action space = 2 basic + 7 raise = 9
+        assert env.action_space_size == 9, f"Expected action_space_size=9, got {env.action_space_size}"
+        assert env.raise_multipliers.shape == (
+            4,
+            7,
+        ), f"Expected raise_multipliers.shape=(4, 7), got {env.raise_multipliers.shape}"
+
+    def test_legal_actions_shape_matches_action_space(self):
+        """Test that legal actions array shape matches action_space_size."""
+        config_str = """GAMEDEF
+nolimit
+numplayers = 2
+stack = 100 100
+blind = 1 2
+raise_multipliers 0 2.0 2.5 3.0 4.0 5.0
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        legal_actions = env._get_legal_actions(state)
+
+        # Should have 7 actions (2 basic + 5 raise)
+        assert env.action_space_size == 7, f"Expected action_space_size=7, got {env.action_space_size}"
+        assert legal_actions.shape == (7,), f"Expected legal_actions.shape=(7,), got {legal_actions.shape}"
+
+    def test_round_specific_legal_actions(self):
+        """Test that legal actions respect round-specific multiplier counts."""
+        config_str = """GAMEDEF
+nolimit
+numplayers = 2
+stack = 100 100
+blind = 1 2
+raise_multipliers 0 2.0 2.5 3.0 4.0 5.0
+raise_multipliers 1 0.5 0.75 1.0
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        # Round 0 (preflop): should have 5 raise actions available (actions 2-6)
+        assert state.round == 0, "Should start on round 0"
+        legal_actions = env._get_legal_actions(state)
+
+        # At least some of actions 2-6 should be potentially legal (if affordable)
+        # Actions 5-6 should exist in the mask
+        assert legal_actions.shape[0] >= 7, f"Should have at least 7 actions, got {legal_actions.shape[0]}"
+
+        # Advance to flop (round 1)
+        state = env.step(state, universal_poker.CALL)
+        state = env.step(state, universal_poker.CALL)
+        assert state.round == 1, "Should be on round 1 (flop)"
+
+        legal_actions_flop = env._get_legal_actions(state)
+
+        # Round 1 only has 3 raise multipliers, so actions 5-6 should always be False
+        # (if they exist, they should be False because no multiplier is set)
+        if legal_actions_flop.shape[0] >= 7:
+            assert legal_actions_flop[5] == False, "Action 5 should be False on round 1 (no multiplier)"
+            assert legal_actions_flop[6] == False, "Action 6 should be False on round 1 (no multiplier)"
+
+    def test_min_max_action_space_sizes(self):
+        """Test edge cases for action space sizes."""
+        # Test with 1 raise multiplier
+        config_str_1 = """GAMEDEF
+nolimit
+numplayers = 2
+stack = 100 100
+blind = 1 2
+raise_multipliers 0 all_in
+END GAMEDEF"""
+        env1 = universal_poker.UniversalPoker(num_players=2, config_str=config_str_1)
+        assert (
+            env1.action_space_size == 3
+        ), f"Expected action_space_size=3 with 1 multiplier (2 basic + 1 raise), got {env1.action_space_size}"
+
+        # Test with many raise multipliers
+        multipliers = " ".join([str(float(i) * 0.1) for i in range(1, 21)])  # 20 multipliers
+        config_str_20 = f"""GAMEDEF
+nolimit
+numplayers = 2
+stack = 100 100
+blind = 1 2
+raise_multipliers 0 {multipliers}
+END GAMEDEF"""
+        env20 = universal_poker.UniversalPoker(num_players=2, config_str=config_str_20)
+        assert (
+            env20.action_space_size == 22
+        ), f"Expected action_space_size=22 with 20 multipliers (2 basic + 20 raise), got {env20.action_space_size}"
+
+    def test_custom_preflop_postflop_action_counts(self):
+        """Test different action counts for preflop vs postflop."""
+        config_str = """GAMEDEF
+nolimit
+numplayers = 2
+stack = 100 100
+blind = 1 2
+raise_multipliers 0 2.0 2.5 3.0
+raise_multipliers 1 0.25 0.5 0.75 1.0 1.5 2.0
+raise_multipliers 2 0.25 0.5 0.75 1.0 1.5 2.0
+raise_multipliers 3 0.25 0.5 0.75 1.0 1.5 2.0
+END GAMEDEF"""
+        env = universal_poker.UniversalPoker(num_players=2, config_str=config_str)
+        key = jax.random.PRNGKey(42)
+        state = env.init(key)
+
+        # Max multipliers: max(3, 6, 6, 6) = 6
+        # Action space = 2 basic + 6 raise = 8
+        assert env.action_space_size == 8, f"Expected action_space_size=8, got {env.action_space_size}"
+
+        # Test that action 7 (last raise action, index 5 in multipliers) works
+        legal_actions = env._get_legal_actions(state)
+        assert legal_actions.shape == (8,), f"Expected legal_actions.shape=(8,), got {legal_actions.shape}"
+
+        # If action 7 is legal and we apply it, it should work without error
+        if legal_actions[7]:
+            new_state = env._apply_action(state, 7)
+            assert new_state.pot > state.pot, "Applying action 7 should increase pot"
 
 
 if __name__ == "__main__":

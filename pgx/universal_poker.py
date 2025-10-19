@@ -106,8 +106,8 @@ class NoLimitBettingStructure:
 
     def apply_action(self, env, state: State, action: int) -> State:
         """Apply action using no-limit poker rules."""
-        # For no-limit games, use basic action for 0-2, nolimit action for 3+
-        is_basic_action = action < 3
+        # For no-limit games, use basic action for 0-1 (fold/call), nolimit action for 2+
+        is_basic_action = action < 2
 
         return jax.lax.cond(
             is_basic_action,
@@ -118,36 +118,47 @@ class NoLimitBettingStructure:
         )
 
     def get_legal_actions(self, env, state: State) -> Array:
-        """Get legal actions for no-limit poker (13 actions)."""
+        """Get legal actions for no-limit poker (dynamic size based on raise_multipliers)."""
         current_player = state.current_player
+        action_count = env.action_space_size
 
-        # 13-action no-limit logic
-        legal_actions = jnp.zeros(13, dtype=jnp.bool_)
+        # Create legal actions array with dynamic size
+        legal_actions = jnp.zeros(action_count, dtype=jnp.bool_)
 
-        # Actions 0-2 (FOLD, CALL, RAISE_MIN) - same logic as limit
+        # Actions 0-1 (FOLD, CALL) - basic actions
         can_fold = ~(state.all_in[current_player] | state.folded[current_player])
         can_call = (
             (state.bets[current_player] <= state.max_bet)
             & (state.stacks[current_player] > 0)
             & ~state.folded[current_player]
         )
-        total_chips = state.stacks[current_player] + state.bets[current_player]
-        can_min_raise = (total_chips > state.max_bet) & ~state.folded[current_player]
 
         legal_actions = legal_actions.at[0].set(can_fold)
         legal_actions = legal_actions.at[1].set(can_call)
-        legal_actions = legal_actions.at[2].set(can_min_raise)
 
-        # Actions 3-12: vectorized check if player can afford each bet size
-        actions_to_check = jnp.arange(3, 13)
+        # Actions 2+: vectorized check if player can afford each bet size
+        # Only check actions that have multipliers defined
+        num_raise_actions = env.raise_multipliers.shape[1]
 
-        def check_affordability(action_idx):
-            bet_amount = env._calculate_nolimit_bet_amount(state, action_idx)
-            return (bet_amount > 0) & (bet_amount <= state.stacks[current_player]) & ~state.folded[current_player]
+        if num_raise_actions > 0:
+            actions_to_check = jnp.arange(2, 2 + num_raise_actions)
 
-        # Vectorized map over actions 3-12
-        affordability = jax.vmap(check_affordability)(actions_to_check)
-        legal_actions = legal_actions.at[3:13].set(affordability)
+            def check_affordability(action_idx):
+                bet_amount = env._calculate_nolimit_bet_amount(state, action_idx)
+                # Check if multiplier is set (non-zero) for this round
+                multiplier_idx = action_idx - 2
+                multiplier = env.raise_multipliers[state.round, multiplier_idx]
+                is_valid_action = multiplier != 0.0
+                return (
+                    is_valid_action
+                    & (bet_amount > 0)
+                    & (bet_amount <= state.stacks[current_player])
+                    & ~state.folded[current_player]
+                )
+
+            # Vectorized map over raise actions
+            affordability = jax.vmap(check_affordability)(actions_to_check)
+            legal_actions = legal_actions.at[2 : 2 + num_raise_actions].set(affordability)
 
         return legal_actions
 
@@ -231,6 +242,9 @@ class UniversalPoker(core.Env):
 
         lines = config_str.strip().split("\n")
 
+        # Collect multipliers in Python lists for JAX-idiomatic processing
+        round_multipliers = [[] for _ in range(4)]  # 4 rounds
+
         for line in lines:
             line = line.strip().lower()
 
@@ -312,8 +326,16 @@ class UniversalPoker(core.Env):
                     round_num = int(values[0])
                     if 0 <= round_num < 4:  # Valid round
                         multipliers = values[1:]
-                        # Update raise_multipliers for this round (up to 10 actions)
-                        for i, mult in enumerate(multipliers[:10]):
+                        round_multipliers[round_num] = multipliers
+
+        # After parsing, create raise_multipliers array with correct size
+        if any(round_multipliers):  # If any multipliers were specified
+            max_count = max(len(m) for m in round_multipliers if m)
+            if max_count > 0:
+                self.raise_multipliers = jnp.zeros((4, max_count), dtype=jnp.float32)
+                for round_num, multipliers in enumerate(round_multipliers):
+                    if multipliers:
+                        for i, mult in enumerate(multipliers):
                             self.raise_multipliers = self.raise_multipliers.at[round_num, i].set(mult)
 
     def _parse_config_line(self, line: str, key: str):
@@ -621,7 +643,7 @@ class UniversalPoker(core.Env):
         )
 
     def _apply_nolimit_action(self, state: State, action: int) -> State:
-        """Apply no-limit betting actions (3-12)."""
+        """Apply no-limit betting actions (2+)."""
         current_player = state.current_player
 
         # Calculate bet amount using the no-limit calculation
@@ -744,8 +766,8 @@ class UniversalPoker(core.Env):
         return next_player
 
     def _calculate_nolimit_bet_amount(self, state: State, action: int) -> int:
-        """Calculate bet amount for no-limit action (3-12) using vectorized operations."""
-        action_idx = action - 3  # Convert to 0-9 index
+        """Calculate bet amount for no-limit action (2+) using vectorized operations."""
+        action_idx = action - 2  # Convert to 0-based index into multipliers
 
         # Get multiplier for current round and action
         multiplier = self.raise_multipliers[state.round, action_idx]
@@ -935,4 +957,8 @@ class UniversalPoker(core.Env):
     @property
     def action_space_size(self) -> int:
         """Return action space size based on game type."""
-        return 13 if self.game_type == "nolimit" else 3
+        if self.game_type == "nolimit":
+            # 2 basic actions (fold, call) + number of raise multipliers
+            return self.raise_multipliers.shape[1] + 2
+        else:
+            return 3

@@ -694,7 +694,7 @@ END GAMEDEF"""
 
         # Verify no-limit setup
         assert env.game_type == "nolimit", "Should be no-limit game"
-        assert state.legal_action_mask.shape == (13,), "Should have 13 actions"
+        assert state.legal_action_mask.shape == (12,), "Should have 12 actions"
 
         # Play through with various no-limit actions
         steps = 0
@@ -704,11 +704,11 @@ END GAMEDEF"""
             legal_actions = jnp.where(state.legal_action_mask)[0]
 
             if len(legal_actions) > 0:
-                # Try to use different no-limit actions (3-12) when possible
+                # Try to use different no-limit actions (2-11) when possible
                 key, subkey = jax.random.split(key)
 
                 # Prefer no-limit actions to test them
-                nolimit_actions = [a for a in legal_actions if a >= 3]
+                nolimit_actions = [a for a in legal_actions if a >= 2]
                 if nolimit_actions and steps % 3 == 0:  # Use no-limit actions sometimes
                     action = int(jax.random.choice(subkey, jnp.array(nolimit_actions)))
                 else:
@@ -724,8 +724,8 @@ END GAMEDEF"""
         # Game should terminate
         assert state.terminated, "Game should terminate"
 
-        # Should have used some no-limit specific actions (3-12)
-        nolimit_actions_used = [a for a in actions_used if a >= 3]
+        # Should have used some no-limit specific actions (2-11)
+        nolimit_actions_used = [a for a in actions_used if a >= 2]
         assert len(nolimit_actions_used) > 0, f"Should have used some no-limit actions, only used {actions_used}"
 
     def test_observation_across_rounds(self):
