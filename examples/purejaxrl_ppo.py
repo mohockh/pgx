@@ -570,7 +570,7 @@ END GAMEDEF"""
 
         # Initialize TensorBoard writer
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        logdir = f"{config.get('TENSORBOARD_DIR', 'runs/ppo_poker')}_{timestamp}"
+        logdir = f"{config.get('TENSORBOARD_DIR', '/tmp/poker/ppo_poker')}_{timestamp}"
         tensorboard_writer = SummaryWriter(logdir)
         print(f"TensorBoard logs will be saved to: {logdir}")
 
@@ -636,7 +636,6 @@ if __name__ == "__main__":
         "OPPONENT_LAG_UPDATES": 1,  # Number of chunks between opponent policy updates
         "OPPONENT_HISTORY_SIZE": 15,  # Max number of past policies to keep
         "LOG_INTERVAL": 1,  # Log every N chunks
-        "TENSORBOARD_DIR": "/tmp/ppo_poker",  # TensorBoard log directory
     }
     rng = jax.random.PRNGKey(30)
     train_fn = make_train(config)
