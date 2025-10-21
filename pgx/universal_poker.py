@@ -952,10 +952,7 @@ class UniversalPoker(core.Env):
         """Calculate final rewards for all players as net stack change."""
         terminal_winnings = self._calculate_terminal_winnings(state)
         # Rewards = winnings - total contributions (net stack change)
-        net_stack_change = terminal_winnings.astype(jnp.float32) - (state.previous_round_bets + state.bets).astype(
-            jnp.float32
-        )
-        return net_stack_change
+        return (terminal_winnings - (state.previous_round_bets + state.bets)).astype(jnp.float32)
 
     @property
     def id(self) -> core.EnvId:
