@@ -15,8 +15,23 @@ import collections
 import random
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
+import orbax.checkpoint
+import os
 #import gymnax
 #from wrappers import LogWrapper, FlattenObservationWrapper
+
+
+def load_checkpoint(checkpoint_path):
+    """Load a checkpoint saved with Orbax.
+
+    Args:
+        checkpoint_path: Path to the checkpoint directory
+
+    Returns:
+        Dictionary with "train_state", "chunk_idx", and "config"
+    """
+    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+    return orbax_checkpointer.restore(checkpoint_path)
 
 
 @jax.jit
@@ -574,6 +589,13 @@ END GAMEDEF"""
         tensorboard_writer = SummaryWriter(logdir)
         print(f"TensorBoard logs will be saved to: {logdir}")
 
+        # Initialize checkpoint directory
+        checkpoint_dir = os.path.join(logdir, "checkpoints")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # Initialize Orbax checkpointer
+        orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+
         # Initialize opponent history
         opponent_history = collections.deque(maxlen=config.get("OPPONENT_HISTORY_SIZE", 100))
         opponent_history.append(network_params)
@@ -584,6 +606,7 @@ END GAMEDEF"""
         # Outer loop: iterate through chunks, updating opponent params between chunks
         num_chunks = int(config["NUM_UPDATES"] // config["CHUNK_SIZE"])
         all_metrics = []
+        checkpoint_interval = config.get("CHECKPOINT_INTERVAL", 50)
 
         for chunk_idx in range(num_chunks):
             # Store current agent params in history
@@ -604,6 +627,18 @@ END GAMEDEF"""
             # Optional: logging outside JIT
             if config.get("DEBUG") and chunk_idx % config.get("LOG_INTERVAL", 10) == 0:
                 print(f"Chunk {chunk_idx + 1}/{num_chunks} completed")
+
+            # Save checkpoint if checkpoint interval is reached
+            if (chunk_idx + 1) % checkpoint_interval == 0:
+                checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{chunk_idx + 1:06d}")
+                checkpoint_data = {
+                    "train_state": train_state,
+                    "chunk_idx": chunk_idx,
+                    "config": config,
+                }
+                orbax_checkpointer.save(checkpoint_path, checkpoint_data)
+                if config.get("DEBUG"):
+                    print(f"Checkpoint saved at chunk {chunk_idx + 1} to {checkpoint_path}")
 
         # Close TensorBoard writer
         if tensorboard_writer is not None:
@@ -636,6 +671,7 @@ if __name__ == "__main__":
         "OPPONENT_LAG_UPDATES": 1,  # Number of chunks between opponent policy updates
         "OPPONENT_HISTORY_SIZE": 15,  # Max number of past policies to keep
         "LOG_INTERVAL": 1,  # Log every N chunks
+        "CHECKPOINT_INTERVAL": 1,  # Save checkpoint every N chunks
     }
     rng = jax.random.PRNGKey(30)
     train_fn = make_train(config)
